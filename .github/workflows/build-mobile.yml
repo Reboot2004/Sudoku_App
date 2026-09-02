@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -83,10 +85,31 @@ jobs:
           ls -lh "$APK"
           sha256sum "$APK"
 
-      - name: Upload debug APK
+      - name: Upload debug APK artifact
         uses: actions/upload-artifact@v7
         with:
           name: dc-sudoku-debug-apk
           path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish APK as GitHub Release
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_TITLE="$(git log -1 --pretty=%s)"
+          RELEASE_NOTES="$(git log -1 --pretty=%B)"
+          TAG="apk-${{ github.run_number }}"
+
+          echo "Creating release: $TAG"
+          echo "Title: $RELEASE_TITLE"
+          echo "Notes:"
+          printf '%s\n' "$RELEASE_NOTES"
+
+          gh release create "$TAG" "$APK" \
+            --target "${GITHUB_SHA}" \
+            --title "$RELEASE_TITLE" \
+            --notes "$RELEASE_NOTES"
