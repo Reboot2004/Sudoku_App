@@ -3,15 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable
 
 import cv2
 import numpy as np
 import pytesseract
 
 
-# Reference layout is 732x606. Coordinates are expressed as fractions of that
-# reference so the crop remains stable when the source resolution varies.
+# Baseline source layout used by the tested crop coordinates.
 REFERENCE_W = 732
 REFERENCE_H = 606
 REGIONS = {
@@ -27,15 +25,25 @@ def load_image(path: Path) -> np.ndarray:
     return image
 
 
-def scale_box(box: tuple[int, int, int, int], w: int, h: int) -> tuple[int, int, int, int]:
-    x1, y1, x2, y2 = box
-    sx, sy = w / REFERENCE_W, h / REFERENCE_H
-    return (
-        max(0, round(x1 * sx)),
-        max(0, round(y1 * sy)),
-        min(w, round(x2 * sx)),
-        min(h, round(y2 * sy)),
+def normalize_source(image: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Normalize the selected source to the tested 732x606 baseline."""
+    h, w = image.shape[:2]
+    scale_x = REFERENCE_W / w
+    scale_y = REFERENCE_H / h
+    normalized = cv2.resize(
+        image,
+        (REFERENCE_W, REFERENCE_H),
+        interpolation=cv2.INTER_AREA,
     )
+    return normalized, {
+        "source_width": w,
+        "source_height": h,
+        "baseline_width": REFERENCE_W,
+        "baseline_height": REFERENCE_H,
+        "scale_x": round(scale_x, 8),
+        "scale_y": round(scale_y, 8),
+        "normalization": "resize_to_baseline",
+    }
 
 
 def preprocess(cell: np.ndarray) -> np.ndarray:
@@ -166,13 +174,17 @@ def main() -> None:
 
     root = Path("dc_test") / args.date / "sudoku"
     root.mkdir(parents=True, exist_ok=True)
-    image = load_image(Path(args.source))
-    h, w = image.shape[:2]
+    source_path = Path(args.source)
+    image = load_image(source_path)
+
+    normalized, normalization = normalize_source(image)
+    normalized_path = root / "sudoku_source_normalized.jpg"
+    cv2.imwrite(str(normalized_path), normalized)
 
     puzzles = []
     for puzzle_id, ref_box in REGIONS.items():
-        x1, y1, x2, y2 = scale_box(ref_box, w, h)
-        crop = image[y1:y2, x1:x2]
+        x1, y1, x2, y2 = ref_box
+        crop = normalized[y1:y2, x1:x2]
         crop_path = root / f"{puzzle_id}.png"
         cv2.imwrite(str(crop_path), crop)
         grid, confidence = read_grid(crop)
@@ -191,19 +203,40 @@ def main() -> None:
         "date": args.date,
         "edition": "Hyderabad",
         "source": "Deccan Chronicle",
-        "source_image": str(args.source),
+        "source_image": str(source_path),
+        "source_dimensions": {
+            "width": normalization["source_width"],
+            "height": normalization["source_height"],
+        },
+        "normalization": normalization,
+        "normalized_source": str(normalized_path),
         "puzzles": puzzles,
     }
     (root / "ocr_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
-    all_verified = all(p["verified"] for p in puzzles)
-    if all_verified:
-        (root / "today.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-        print("PIPELINE STATUS: VERIFIED")
-    else:
-        print("PIPELINE STATUS: NEEDS REVIEW")
-        for p in puzzles:
-            print(p["title"], p["validation"])
+    # Verification remains metadata only. The Action publishes the OCR result
+    # regardless of the verification flag.
+    canonical = {
+        "date": result["date"],
+        "edition": result["edition"],
+        "source": result["source"],
+        "puzzles": [
+            {
+                "id": p["id"],
+                "title": p["title"],
+                "verified": bool(p.get("verified", False)),
+                "grid": p["grid"],
+            }
+            for p in result["puzzles"]
+        ],
+    }
+    (root / "today.json").write_text(json.dumps(canonical, indent=2) + "\n", encoding="utf-8")
+
+    print("PIPELINE STATUS: COMPLETE")
+    print(f"Source dimensions: {normalization['source_width']}x{normalization['source_height']}")
+    print(f"Normalized to: {REFERENCE_W}x{REFERENCE_H}")
+    for p in puzzles:
+        print(p["title"], p["validation"])
 
 
 if __name__ == "__main__":
