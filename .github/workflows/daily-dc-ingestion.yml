@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set processing date
         id: date
@@ -43,7 +43,7 @@ jobs:
           echo "Processing date: $DATE"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -86,7 +86,7 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: Crop Sudoku 1 and Sudoku 2
+      - name: Crop and OCR Sudoku 1 and Sudoku 2
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
@@ -150,7 +150,7 @@ jobs:
           git push origin HEAD:main
 
       - name: Upload complete ingestion artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dc-sudoku-${{ steps.date.outputs.date }}
           path: dc_test/${{ steps.date.outputs.date }}/
@@ -158,7 +158,7 @@ jobs:
           retention-days: 14
 
       - name: Upload canonical daily JSON
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dc-sudoku-json-${{ steps.date.outputs.date }}
           path: frontend/public/data/today.json
