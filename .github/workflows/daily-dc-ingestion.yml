@@ -1,0 +1,33 @@
+name: Daily DC Sudoku Ingestion
+on:
+  schedule:
+    - cron: '30 2 * * 1-6'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to scan (YYYY-MM-DD). Empty = today.'
+        required: false
+        type: string
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Resolve date
+        id: date
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then echo "date=${{ inputs.date }}" >> "$GITHUB_OUTPUT"; else echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"; fi
+      - name: Install ingestion dependencies
+        run: pip install requests opencv-python-headless numpy
+      - name: Run DC detector
+        run: python ingestion/dc_sudoku_detect.py --date "${{ steps.date.outputs.date }}" --keep-all
+      - name: Upload scan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-sudoku-${{ steps.date.outputs.date }}
+          path: dc_test/${{ steps.date.outputs.date }}/
+          if-no-files-found: error
