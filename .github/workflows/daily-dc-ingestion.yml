@@ -16,8 +16,8 @@ permissions:
   contents: read
 
 jobs:
-  detect:
-    name: Detect DC Sudoku image
+  ingest:
+    name: Detect, crop, OCR and validate DC Sudoku
     runs-on: ubuntu-latest
 
     steps:
@@ -47,12 +47,19 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install system OCR dependency
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+          tesseract --version | head -n 1
+
       - name: Install ingestion dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests opencv-python-headless numpy
+          pip install requests opencv-python-headless numpy pytesseract
 
-      - name: Run DC image detector
+      - name: Detect DC Sudoku source image
         run: |
           python ingestion/dc_sudoku_detect.py \
             --date "${{ steps.date.outputs.date }}" \
@@ -63,16 +70,78 @@ jobs:
             --workers 12 \
             --keep-all
 
-      - name: Show selected candidate
+      - name: Show detection result
         shell: bash
         run: |
-          echo "=== Detection summary ==="
-          cat "dc_test/${{ steps.date.outputs.date }}/detection.json"
+          echo "=== Detection result ==="
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("dc_test/${{ steps.date.outputs.date }}/detection.json")
+          d = json.loads(p.read_text())
+          b = d["best"]
+          print(f"Selected: tabp{b['page']}_{b['variant']}.jpg")
+          print(f"Size: {b['width']}x{b['height']}")
+          print(f"Score: {b['final_score']:.2f}")
+          print(f"Downloaded candidates: {d['downloaded']}")
+          PY
 
-      - name: Upload ingestion artifacts
+      - name: Crop Sudoku 1 and Sudoku 2
+        run: |
+          python ingestion/dc_sudoku_pipeline.py \
+            --date "${{ steps.date.outputs.date }}" \
+            --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg"
+
+      - name: Show OCR and validation result
+        shell: bash
+        run: |
+          echo "=== OCR / validation result ==="
+          cat "dc_test/${{ steps.date.outputs.date }}/sudoku/ocr_result.json"
+
+      - name: Generate canonical daily JSON
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          date = "${{ steps.date.outputs.date }}"
+          root = Path("dc_test") / date / "sudoku"
+          result = json.loads((root / "ocr_result.json").read_text())
+          verified = all(p.get("verified") is True for p in result.get("puzzles", []))
+          if not verified:
+              print("Canonical JSON NOT published: one or more puzzles failed verification.")
+              for p in result.get("puzzles", []):
+                  print(p["title"], p.get("validation", {}))
+              raise SystemExit(0)
+          canonical = {
+              "date": result["date"],
+              "edition": result["edition"],
+              "source": result["source"],
+              "puzzles": [
+                  {"id": p["id"], "title": p["title"], "verified": True, "grid": p["grid"]}
+                  for p in result["puzzles"]
+              ],
+          }
+          target = Path("frontend/public/data/today.json")
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_text(json.dumps(canonical, indent=2) + "\n")
+          (root / "today.json").write_text(json.dumps(canonical, indent=2) + "\n")
+          print(f"Published canonical JSON for {date}")
+          PY
+
+      - name: Upload complete ingestion artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dc-sudoku-${{ steps.date.outputs.date }}
           path: dc_test/${{ steps.date.outputs.date }}/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload canonical daily JSON
+        if: ${{ hashFiles('frontend/public/data/today.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-sudoku-json-${{ steps.date.outputs.date }}
+          path: frontend/public/data/today.json
           if-no-files-found: error
           retention-days: 14
