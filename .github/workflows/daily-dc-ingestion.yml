@@ -54,7 +54,14 @@ jobs:
 
       - name: Run DC image detector
         run: |
-          python ingestion/dc_sudoku_detect.py             --date "${{ steps.date.outputs.date }}"             --page-min 1             --page-max 12             --variant-min 1             --variant-max 10             --workers 12             --keep-all
+          python ingestion/dc_sudoku_detect.py \
+            --date "${{ steps.date.outputs.date }}" \
+            --page-min 1 \
+            --page-max 20 \
+            --variant-min 1 \
+            --variant-max 10 \
+            --workers 12 \
+            --keep-all
 
       - name: Show selected candidate
         shell: bash
