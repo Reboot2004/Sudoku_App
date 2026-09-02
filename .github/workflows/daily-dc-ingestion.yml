@@ -1,33 +1,71 @@
 name: Daily DC Sudoku Ingestion
+
 on:
   schedule:
-    - cron: '30 2 * * 1-6'
+    # 08:00 IST / 02:30 UTC, Monday through Saturday.
+    - cron: "30 2 * * 1-6"
+
   workflow_dispatch:
     inputs:
       date:
-        description: 'Date to scan (YYYY-MM-DD). Empty = today.'
+        description: "Date to process (YYYY-MM-DD). Leave empty for today."
         required: false
         type: string
+
+permissions:
+  contents: read
+
 jobs:
   detect:
+    name: Detect DC Sudoku image
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Resolve date
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set processing date
         id: date
         shell: bash
         run: |
-          if [ -n "${{ inputs.date }}" ]; then echo "date=${{ inputs.date }}" >> "$GITHUB_OUTPUT"; else echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "${{ inputs.date }}" ]; then
+            DATE="${{ inputs.date }}"
+          else
+            DATE="$(date -u +%F)"
+          fi
+
+          if ! [[ "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "Invalid date: $DATE"
+            exit 1
+          fi
+
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "Processing date: $DATE"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install ingestion dependencies
-        run: pip install requests opencv-python-headless numpy
-      - name: Run DC detector
-        run: python ingestion/dc_sudoku_detect.py --date "${{ steps.date.outputs.date }}" --keep-all
-      - name: Upload scan artifacts
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests opencv-python-headless numpy
+
+      - name: Run DC image detector
+        run: |
+          python ingestion/dc_sudoku_detect.py             --date "${{ steps.date.outputs.date }}"             --page-min 1             --page-max 12             --variant-min 1             --variant-max 10             --workers 12             --keep-all
+
+      - name: Show selected candidate
+        shell: bash
+        run: |
+          echo "=== Detection summary ==="
+          cat "dc_test/${{ steps.date.outputs.date }}/detection.json"
+
+      - name: Upload ingestion artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dc-sudoku-${{ steps.date.outputs.date }}
           path: dc_test/${{ steps.date.outputs.date }}/
           if-no-files-found: error
+          retention-days: 14
