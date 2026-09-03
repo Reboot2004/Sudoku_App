@@ -18,6 +18,7 @@ permissions:
 
 env:
   TZ: Asia/Kolkata
+  PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
 
 jobs:
   ingest:
@@ -54,16 +55,20 @@ jobs:
 
       - name: Install Sudoku OCR dependencies
         shell: bash
-        env:
-          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
         run: |
           python -m pip install --upgrade "pip<25"
+
+          # Install sudoku-ocr and its legacy dependencies first.
           pip install \
             "requests<3" \
             "numpy<2" \
             "opencv-python==4.5.2.54" \
-            "sudoku-ocr==1.1.3" \
-            "protobuf==3.20.3"
+            "sudoku-ocr==1.1.3"
+
+          # TensorFlow 2.8 / sudoku-ocr is incompatible with modern protobuf.
+          # Force the known-compatible protobuf version after dependency resolution
+          # so pip cannot leave protobuf 6.x installed.
+          pip install --force-reinstall --no-deps "protobuf==3.20.3"
 
           python - <<'PY'
           import cv2
@@ -72,6 +77,8 @@ jobs:
 
           print(f"Python/OpenCV ready: OpenCV {cv2.__version__}")
           print(f"protobuf ready: {google.protobuf.__version__}")
+          if google.protobuf.__version__ != "3.20.3":
+              raise SystemExit("Expected protobuf 3.20.3")
           Board()
           print("sudoku-ocr initialized successfully")
           PY
@@ -104,8 +111,6 @@ jobs:
           PY
 
       - name: Crop and OCR Sudoku 1 and Sudoku 2
-        env:
-          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
