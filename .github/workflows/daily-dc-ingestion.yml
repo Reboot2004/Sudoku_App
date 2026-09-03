@@ -63,6 +63,15 @@ jobs:
             "numpy<2" \
             "opencv-python" \
             "pytesseract"
+          tesseract --version | head -n 1
+          python - <<'PY'
+          import cv2
+          import numpy
+          import pytesseract
+          print("OpenCV:", cv2.__version__)
+          print("NumPy:", numpy.__version__)
+          print("pytesseract:", pytesseract.__version__)
+          PY
 
       - name: Detect DC Sudoku source image
         run: |
@@ -91,7 +100,8 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: Mask and OCR Sudoku 1 and Sudoku 2
+      - name: OCR Sudoku using fixed cells and same-image templates
+        shell: bash
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
