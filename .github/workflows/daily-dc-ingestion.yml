@@ -18,11 +18,10 @@ permissions:
 
 env:
   TZ: Asia/Kolkata
-  PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
 
 jobs:
   ingest:
-    name: Detect, crop, OCR and validate DC Sudoku
+    name: Detect, mask, OCR and validate DC Sudoku
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -53,44 +52,17 @@ jobs:
         with:
           python-version: "3.9"
 
-      - name: Install CNN OCR dependencies
+      - name: Install OCR dependencies
         shell: bash
         run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
           python -m pip install --upgrade "pip<25"
           pip install \
             "requests<3" \
             "numpy<2" \
             "opencv-python" \
-            "tensorflow==2.16.1" \
-            "protobuf==3.20.3"
-
-      - name: Download Sudoku digit CNN
-        shell: bash
-        run: |
-          mkdir -p dc_test/models
-          curl -L --fail --retry 3 \
-            "https://raw.githubusercontent.com/Sotejaswini/Sudoku-Solver-OCR/main/AI-SUDOKU-SOLVER-USING-OCR-main/Main%20Model%20and%20supporting%20files/model/model-4.h5" \
-            -o dc_test/models/model-4.h5
-          ls -lh dc_test/models/model-4.h5
-
-      - name: Verify CNN model and runtime
-        env:
-          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
-        run: |
-          python - <<'PY'
-          import cv2
-          import google.protobuf
-          import tensorflow as tf
-          from tensorflow.keras.models import load_model
-
-          print(f"OpenCV: {cv2.__version__}")
-          print(f"TensorFlow: {tf.__version__}")
-          print(f"protobuf: {google.protobuf.__version__}")
-          if google.protobuf.__version__ != "3.20.3":
-              raise SystemExit("Expected protobuf 3.20.3")
-          model = load_model("dc_test/models/model-4.h5", compile=False)
-          print(f"CNN model loaded: input={model.input_shape} output={model.output_shape}")
-          PY
+            "pytesseract"
 
       - name: Detect DC Sudoku source image
         run: |
@@ -119,14 +91,11 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: Crop and OCR Sudoku 1 and Sudoku 2
-        env:
-          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+      - name: Mask and OCR Sudoku 1 and Sudoku 2
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
-            --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg" \
-            --model "dc_test/models/model-4.h5"
+            --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg"
 
       - name: Show OCR and validation result
         shell: bash
