@@ -52,17 +52,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system OCR dependency
+      - name: Install OCR dependencies
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
-          tesseract --version | head -n 1
-
-      - name: Install ingestion dependencies
-        run: |
           python -m pip install --upgrade pip
-          pip install requests opencv-python-headless numpy pytesseract
+          pip install requests opencv-python-headless numpy rapidocr onnxruntime
+          python - <<'PY'
+          from rapidocr import RapidOCR
+          RapidOCR()
+          print("RapidOCR initialized successfully")
+          PY
 
       - name: Detect DC Sudoku source image
         run: |
