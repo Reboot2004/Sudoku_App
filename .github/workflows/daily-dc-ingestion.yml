@@ -54,23 +54,24 @@ jobs:
 
       - name: Install Sudoku OCR dependencies
         shell: bash
+        env:
+          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
         run: |
           python -m pip install --upgrade "pip<25"
-          python -m pip install --no-cache-dir \
+          pip install \
             "requests<3" \
             "numpy<2" \
             "opencv-python==4.5.2.54" \
-            "sudoku-ocr==1.1.3"
+            "sudoku-ocr==1.1.3" \
+            "protobuf==3.20.3"
+
           python - <<'PY'
           import cv2
-          import numpy
-          import sudoku_ocr
+          import google.protobuf
           from sudoku_ocr import Board
 
-          print("Python:", __import__("sys").version)
-          print("NumPy:", numpy.__version__)
-          print("OpenCV:", cv2.__version__)
-          print("sudoku-ocr:", getattr(sudoku_ocr, "__version__", "unknown"))
+          print(f"Python/OpenCV ready: OpenCV {cv2.__version__}")
+          print(f"protobuf ready: {google.protobuf.__version__}")
           Board()
           print("sudoku-ocr initialized successfully")
           PY
@@ -103,6 +104,8 @@ jobs:
           PY
 
       - name: Crop and OCR Sudoku 1 and Sudoku 2
+        env:
+          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
