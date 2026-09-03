@@ -59,11 +59,7 @@ jobs:
           sudo apt-get install -y tesseract-ocr
           tesseract --version | head -n 1
           python -m pip install --upgrade "pip<25"
-          pip install \
-            "requests<3" \
-            "numpy<2" \
-            "opencv-python" \
-            "pytesseract"
+          pip install "requests<3" "numpy<2" "opencv-python" "pytesseract"
           python - <<'PY'
           import cv2
           import numpy
@@ -73,6 +69,8 @@ jobs:
           print("pytesseract:", pytesseract.__version__)
           PY
 
+      # Detection is intentionally unchanged. It finds and saves the best
+      # 729x600-ish DC Sudoku source image as sudoku_source.jpg.
       - name: Detect DC Sudoku source image
         run: |
           python ingestion/dc_sudoku_detect.py \
@@ -100,12 +98,21 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: OCR each Sudoku cell independently
+      - name: Crop Sudoku images and run best-effort cell OCR
         shell: bash
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
             --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg"
+
+      - name: Copy cropped Sudoku images into frontend data
+        shell: bash
+        run: |
+          DATE="${{ steps.date.outputs.date }}"
+          mkdir -p "frontend/public/data/dc/$DATE"
+          cp "dc_test/$DATE/sudoku/dc-1.jpg" "frontend/public/data/dc/$DATE/dc-1.jpg"
+          cp "dc_test/$DATE/sudoku/dc-2.jpg" "frontend/public/data/dc/$DATE/dc-2.jpg"
+          ls -lh "frontend/public/data/dc/$DATE/"
 
       - name: Show OCR and validation result
         shell: bash
@@ -124,8 +131,8 @@ jobs:
           root = Path("dc_test") / date / "sudoku"
           result = json.loads((root / "ocr_result.json").read_text())
 
-          # Verification is retained as metadata, but it does not block
-          # publication. The OCR result is the source of truth for today.json.
+          # The cropped newspaper image is the visual source of truth. OCR is
+          # retained only as machine-readable data for solver interactions.
           canonical = {
               "date": result["date"],
               "edition": result["edition"],
@@ -135,6 +142,7 @@ jobs:
                       "id": p["id"],
                       "title": p["title"],
                       "verified": bool(p.get("verified", False)),
+                      "image": p["image"],
                       "grid": p["grid"],
                   }
                   for p in result["puzzles"]
@@ -148,17 +156,17 @@ jobs:
           (root / "today.json").write_text(text, encoding="utf-8")
 
           print(f"Published canonical JSON for {date}")
-          print("Verification does not block publication.")
+          print("Cropped Sudoku images are the visual source of truth.")
           PY
 
-      - name: Commit canonical daily JSON
+      - name: Commit daily Sudoku data and images
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add frontend/public/data/today.json
+          git add frontend/public/data/today.json "frontend/public/data/dc/${{ steps.date.outputs.date }}"
           if git diff --cached --quiet; then
-            echo "today.json is unchanged; nothing to commit."
+            echo "Daily Sudoku data is unchanged; nothing to commit."
             exit 0
           fi
           git commit -m "data: update DC Sudoku for ${{ steps.date.outputs.date }}"
