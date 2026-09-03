@@ -9,20 +9,17 @@ import cv2
 import numpy as np
 import pytesseract
 
-# Detection owns discovery of sudoku_source.jpg. OCR deliberately does not
-# perform another Sudoku detector because the DC Coffee-Break layout is stable.
+# Detection owns discovery of sudoku_source.jpg. OCR only consumes that image.
 CANONICAL_SIZE = (732, 606)  # width, height
-
+OCR_SCALE = 4
 BOARD_BOXES = {
     "dc-1": (40, 74, 342, 340),
     "dc-2": (383, 72, 691, 340),
 }
-
 GRID_LINES = {
     "dc-1": {"x": [1, 35, 68, 101, 135, 167, 201, 234, 267, 300], "y": [2, 31, 60, 89, 118, 148, 177, 206, 235, 264]},
     "dc-2": {"x": [1, 35, 68, 102, 136, 169, 203, 236, 270, 304], "y": [0, 29, 58, 88, 117, 147, 176, 206, 235, 265]},
 }
-
 DIGITS = "123456789"
 
 
@@ -56,25 +53,22 @@ def cell_boxes(x_lines: list[int], y_lines: list[int], inset: int = 3):
             yield r, c, (x_lines[c] + inset, y_lines[r] + inset, x_lines[c + 1] - inset, y_lines[r + 1] - inset)
 
 
-def cell_variants(cell: np.ndarray) -> list[np.ndarray]:
+def preprocess_cell(cell: np.ndarray) -> list[np.ndarray]:
+    """Upscale only for OCR; the saved/display image is never resized."""
     gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-    variants = [
-        gray,
-        cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1],
-        cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2),
-    ]
-    out = []
-    for image in variants:
-        image = cv2.copyMakeBorder(image, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=255)
-        image = cv2.resize(image, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
-        out.append(image)
-    return out
+    enlarged = cv2.resize(gray, None, fx=OCR_SCALE, fy=OCR_SCALE, interpolation=cv2.INTER_CUBIC)
+    enlarged = cv2.copyMakeBorder(enlarged, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
+
+    variants = [enlarged]
+    variants.append(cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1])
+    variants.append(cv2.adaptiveThreshold(enlarged, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 7))
+    return variants
 
 
 def ocr_cell(cell: np.ndarray) -> tuple[int, float, list[str]]:
     votes: list[str] = []
-    confidences: list[float] = []
-    for image in cell_variants(cell):
+    confs: list[float] = []
+    for image in preprocess_cell(cell):
         for psm in (10, 13):
             data = pytesseract.image_to_data(
                 image,
@@ -86,7 +80,7 @@ def ocr_cell(cell: np.ndarray) -> tuple[int, float, list[str]]:
                 if len(text) == 1:
                     votes.append(text)
                     try:
-                        confidences.append(float(conf))
+                        confs.append(float(conf))
                     except ValueError:
                         pass
     if not votes:
@@ -96,34 +90,41 @@ def ocr_cell(cell: np.ndarray) -> tuple[int, float, list[str]]:
         counts[v] = counts.get(v, 0) + 1
     best = max(counts, key=counts.get)
     vote_score = counts[best] / len(votes)
-    ocr_score = (float(np.mean(confidences)) / 100.0) if confidences else 0.0
-    return int(best), round(0.5 * vote_score + 0.5 * max(0.0, min(1.0, ocr_score)), 4), votes
+    mean_conf = (float(np.mean(confs)) / 100.0) if confs else 0.0
+    return int(best), round(0.5 * vote_score + 0.5 * max(0.0, min(1.0, mean_conf)), 4), votes
 
 
 def ocr_grid(crop: np.ndarray, x_lines: list[int], y_lines: list[int]) -> tuple[list[list[int]], dict[str, Any], np.ndarray]:
     grid = [[0] * 9 for _ in range(9)]
     confidence = [[0.0] * 9 for _ in range(9)]
-    cells: list[dict[str, Any]] = []
+    cells_meta: list[dict[str, Any]] = []
     debug = crop.copy()
     occupied = 0
 
-    for r, c, (x1, y1, x2, y2) in cell_boxes(x_lines, y_lines, inset=3):
-        if x2 <= x1 or y2 <= y1:
-            continue
-        digit, conf, votes = ocr_cell(crop[y1:y2, x1:x2])
+    for r, c, (x1, y1, x2, y2) in cell_boxes(x_lines, y_lines):
+        cell = crop[y1:y2, x1:x2]
+        digit, conf, votes = ocr_cell(cell)
         grid[r][c] = digit
         confidence[r][c] = conf
         if digit:
             occupied += 1
             cv2.putText(debug, str(digit), (int((x1 + x2) / 2 - 5), int((y1 + y2) / 2 + 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 1, cv2.LINE_AA)
-        cells.append({"row": r + 1, "column": c + 1, "digit": digit, "confidence": conf, "votes": votes, "cell": [x1, y1, x2, y2]})
+        cells_meta.append({"row": r + 1, "column": c + 1, "digit": digit, "confidence": conf, "votes": votes, "cell": [x1, y1, x2, y2]})
 
     for x in x_lines:
         cv2.line(debug, (x, 0), (x, debug.shape[0] - 1), (0, 0, 255), 1)
     for y in y_lines:
         cv2.line(debug, (0, y), (debug.shape[1] - 1, y), (0, 0, 255), 1)
 
-    return grid, {"engine": "Tesseract per-cell OCR", "occupied_cells": occupied, "confidence": confidence, "cells": cells, "note": "Only isolated Sudoku cells are OCR'd. The cropped Sudoku image itself is retained as the visual source for the app. No global resize, normalization or secondary Sudoku detection is performed."}, debug
+    meta = {
+        "engine": "Tesseract per-cell OCR",
+        "ocr_scale": OCR_SCALE,
+        "occupied_cells": occupied,
+        "confidence": confidence,
+        "cells": cells_meta,
+        "note": "Original cropped Sudoku image is retained unchanged for app display. Upscaling is applied only to OCR working cells.",
+    }
+    return grid, meta, debug
 
 
 def solution_count(grid: list[list[int]], limit: int = 2) -> int:
@@ -181,7 +182,7 @@ def validate(grid: list[list[int]]) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Crop DC Sudoku boards and perform best-effort per-cell OCR.")
+    parser = argparse.ArgumentParser(description="DC Sudoku OCR: fixed cells with OCR-only enlargement.")
     parser.add_argument("--date", required=True)
     parser.add_argument("--source", required=True)
     args = parser.parse_args()
@@ -194,20 +195,19 @@ def main() -> None:
     print(f"Source dimensions: {source_w}x{source_h}")
     print("Source normalization: DISABLED")
     print("Detection stage: UNCHANGED")
-    print("OCR: isolated cells; cropped board image retained for app")
+    print(f"OCR: isolated cells + {OCR_SCALE}x OCR-only enlargement")
 
     puzzles = []
     for puzzle_id, box in BOARD_BOXES.items():
         crop = crop_region(image, scaled_box(box, source_w, source_h))
         image_path = root / f"{puzzle_id}.jpg"
-        debug_path = root / f"{puzzle_id}-ocr-debug.jpg"
         raw_path = root / f"{puzzle_id}-raw-crop.png"
+        debug_path = root / f"{puzzle_id}-ocr-debug.jpg"
         cv2.imwrite(str(image_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
         cv2.imwrite(str(raw_path), crop)
 
         geometry = GRID_LINES[puzzle_id]
-        box_w = box[2] - box[0]
-        box_h = box[3] - box[1]
+        box_w, box_h = box[2] - box[0], box[3] - box[1]
         sx = crop.shape[1] / float(box_w)
         sy = crop.shape[0] / float(box_h)
         x_lines = [round(v * sx) for v in geometry["x"]]
@@ -216,6 +216,7 @@ def main() -> None:
         grid, ocr_meta, debug = ocr_grid(crop, x_lines, y_lines)
         checks = validate(grid)
         cv2.imwrite(str(debug_path), debug, [cv2.IMWRITE_JPEG_QUALITY, 92])
+
         print(f"{puzzle_id} grid: {grid}")
         print(f"{puzzle_id} validation: {checks}")
 
@@ -231,7 +232,17 @@ def main() -> None:
             "debug": str(debug_path),
         })
 
-    result = {"date": args.date, "edition": "Hyderabad", "source": "Deccan Chronicle", "source_image": str(args.source), "source_dimensions": {"width": source_w, "height": source_h}, "normalization": {"enabled": False}, "ocr_engine": "Tesseract per-cell OCR", "puzzles": puzzles}
+    result = {
+        "date": args.date,
+        "edition": "Hyderabad",
+        "source": "Deccan Chronicle",
+        "source_image": str(args.source),
+        "source_dimensions": {"width": source_w, "height": source_h},
+        "normalization": {"enabled": False},
+        "ocr_engine": "Tesseract per-cell OCR with OCR-only enlargement",
+        "ocr_scale": OCR_SCALE,
+        "puzzles": puzzles,
+    }
     (root / "ocr_result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     canonical = {
