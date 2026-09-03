@@ -53,34 +53,43 @@ jobs:
         with:
           python-version: "3.9"
 
-      - name: Install Sudoku OCR dependencies
+      - name: Install CNN OCR dependencies
         shell: bash
         run: |
           python -m pip install --upgrade "pip<25"
-
-          # Install sudoku-ocr and its legacy dependencies first.
           pip install \
             "requests<3" \
             "numpy<2" \
-            "opencv-python==4.5.2.54" \
-            "sudoku-ocr==1.1.3"
+            "opencv-python" \
+            "tensorflow==2.8.0" \
+            "protobuf==3.20.3"
 
-          # TensorFlow 2.8 / sudoku-ocr is incompatible with modern protobuf.
-          # Force the known-compatible protobuf version after dependency resolution
-          # so pip cannot leave protobuf 6.x installed.
-          pip install --force-reinstall --no-deps "protobuf==3.20.3"
+      - name: Download Sudoku digit CNN
+        shell: bash
+        run: |
+          mkdir -p dc_test/models
+          curl -L --fail --retry 3 \
+            "https://raw.githubusercontent.com/Sotejaswini/Sudoku-Solver-OCR/main/AI-SUDOKU-SOLVER-USING-OCR-main/Main%20Model%20and%20supporting%20files/model/model-4.h5" \
+            -o dc_test/models/model-4.h5
+          ls -lh dc_test/models/model-4.h5
 
+      - name: Verify CNN model and runtime
+        env:
+          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+        run: |
           python - <<'PY'
           import cv2
           import google.protobuf
-          from sudoku_ocr import Board
+          import tensorflow as tf
+          from tensorflow.keras.models import load_model
 
-          print(f"Python/OpenCV ready: OpenCV {cv2.__version__}")
-          print(f"protobuf ready: {google.protobuf.__version__}")
+          print(f"OpenCV: {cv2.__version__}")
+          print(f"TensorFlow: {tf.__version__}")
+          print(f"protobuf: {google.protobuf.__version__}")
           if google.protobuf.__version__ != "3.20.3":
               raise SystemExit("Expected protobuf 3.20.3")
-          Board()
-          print("sudoku-ocr initialized successfully")
+          model = load_model("dc_test/models/model-4.h5", compile=False)
+          print(f"CNN model loaded: input={model.input_shape} output={model.output_shape}")
           PY
 
       - name: Detect DC Sudoku source image
@@ -111,10 +120,13 @@ jobs:
           PY
 
       - name: Crop and OCR Sudoku 1 and Sudoku 2
+        env:
+          PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
-            --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg"
+            --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg" \
+            --model "dc_test/models/model-4.h5"
 
       - name: Show OCR and validation result
         shell: bash
