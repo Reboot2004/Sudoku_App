@@ -61,7 +61,7 @@ jobs:
             "requests<3" \
             "numpy<2" \
             "opencv-python" \
-            "tensorflow==2.8.0" \
+            "tensorflow==2.16.1" \
             "protobuf==3.20.3"
 
       - name: Download Sudoku digit CNN
