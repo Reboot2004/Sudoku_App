@@ -23,9 +23,6 @@ jobs:
   ingest:
     name: Detect, crop, OCR and validate DC Sudoku
     runs-on: ubuntu-latest
-    env:
-      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-      NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
 
     steps:
       - name: Checkout repository
@@ -171,31 +168,3 @@ jobs:
           path: frontend/public/data/today.json
           if-no-files-found: error
           retention-days: 14
-
-      - name: Send success email
-        if: ${{ success() && env.SMTP_USERNAME != '' && env.NOTIFY_EMAIL != '' }}
-        uses: dawidd6/action-send-mail@v6
-        with:
-          server_address: ${{ secrets.SMTP_SERVER }}
-          server_port: ${{ secrets.SMTP_PORT || 465 }}
-          secure: true
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "DC Sudoku ingestion succeeded - ${{ steps.date.outputs.date }}"
-          to: ${{ secrets.NOTIFY_EMAIL }}
-          from: ${{ secrets.SMTP_USERNAME }}
-          body: |
-            Daily DC Sudoku ingestion completed successfully.
-
-            Date: ${{ steps.date.outputs.date }}
-            Repository: ${{ github.repository }}
-            Workflow: ${{ github.workflow }}
-            Run: ${{ github.run_number }}
-            Commit: ${{ github.sha }}
-
-            The canonical today.json was generated and published.
-
-      - name: Explain email configuration
-        if: ${{ success() && (env.SMTP_USERNAME == '' || env.NOTIFY_EMAIL == '') }}
-        run: |
-          echo "Success email skipped because SMTP_USERNAME or NOTIFY_EMAIL is not configured."
