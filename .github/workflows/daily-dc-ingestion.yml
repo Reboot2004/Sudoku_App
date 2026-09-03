@@ -21,7 +21,7 @@ env:
 
 jobs:
   ingest:
-    name: Detect, mask, OCR and validate DC Sudoku
+    name: Detect, isolate and OCR DC Sudoku
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -57,13 +57,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
+          tesseract --version | head -n 1
           python -m pip install --upgrade "pip<25"
           pip install \
             "requests<3" \
             "numpy<2" \
             "opencv-python" \
             "pytesseract"
-          tesseract --version | head -n 1
           python - <<'PY'
           import cv2
           import numpy
@@ -100,7 +100,7 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: OCR Sudoku using fixed cells and same-image templates
+      - name: OCR each Sudoku cell independently
         shell: bash
         run: |
           python ingestion/dc_sudoku_pipeline.py \
