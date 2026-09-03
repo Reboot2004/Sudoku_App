@@ -2,23 +2,38 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
-from tensorflow.keras.models import load_model
+import pytesseract
 
-# Approximate source-image regions for the two DC Sudoku boards.
-# The source image is deliberately kept at its original dimensions; no
-# global resize/normalization is performed before cropping.
-REGIONS = {
-    "dc-1": (40, 75, 341, 339),
-    "dc-2": (383, 70, 689, 338),
+# The DC Coffee-Break image has a stable layout.  Instead of asking a generic
+# OCR model to interpret the whole newspaper image, we explicitly isolate the
+# two Sudoku boards first and discard everything else.
+# Coordinates below are for the canonical 732x606 source image used by the
+# current DC assets.  They are scaled only when the downloaded asset has a
+# slightly different pixel size; the source image itself is never resized.
+CANONICAL_SIZE = (732, 606)  # width, height
+
+BOARD_BOXES = {
+    "dc-1": (40, 74, 342, 340),
+    "dc-2": (383, 72, 691, 340),
 }
 
-MODEL_LABELS = "0123456789"
+# Detected grid-line centers for the canonical source.  Removing these lines
+# leaves almost pure digit components inside the 81 cells.
+GRID_LINES = {
+    "dc-1": {
+        "x": [1, 35, 68, 101, 135, 167, 201, 234, 267, 300],
+        "y": [2, 31, 60, 89, 118, 148, 177, 206, 235, 264],
+    },
+    "dc-2": {
+        "x": [1, 35, 68, 102, 136, 169, 203, 236, 270, 304],
+        "y": [0, 29, 58, 88, 117, 147, 176, 206, 235, 265],
+    },
+}
 
 
 def load_image(path: Path) -> np.ndarray:
@@ -26,6 +41,22 @@ def load_image(path: Path) -> np.ndarray:
     if image is None:
         raise RuntimeError(f"Could not read image: {path}")
     return image
+
+
+def scaled_box(box: tuple[int, int, int, int], width: int, height: int) -> tuple[int, int, int, int]:
+    sx = width / CANONICAL_SIZE[0]
+    sy = height / CANONICAL_SIZE[1]
+    x1, y1, x2, y2 = box
+    return (
+        round(x1 * sx),
+        round(y1 * sy),
+        round(x2 * sx),
+        round(y2 * sy),
+    )
+
+
+def scaled_lines(lines: list[int], scale: float) -> list[int]:
+    return [round(v * scale) for v in lines]
 
 
 def crop_region(image: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
@@ -40,103 +71,142 @@ def crop_region(image: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray
     return image[y1:y2, x1:x2]
 
 
-def extract_digit(cell: np.ndarray) -> np.ndarray | None:
-    """Extract the dominant digit contour from one original-resolution cell."""
-    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-    threshold = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+def build_digit_mask(crop: np.ndarray, x_lines: list[int], y_lines: list[int]) -> np.ndarray:
+    """Return a binary mask containing only ink inside the Sudoku cells."""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
 
-    # Remove border-touching grid fragments. This only changes the cell passed
-    # to the classifier; the original source image remains untouched.
-    h, w = threshold.shape
-    mask = np.zeros_like(threshold)
-    contours, _ = cv2.findContours(threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    candidates = []
-    for contour in contours:
-        x, y, cw, ch = cv2.boundingRect(contour)
-        area = cv2.contourArea(contour)
-        if x <= 1 or y <= 1 or x + cw >= w - 1 or y + ch >= h - 1:
-            continue
-        if area < (w * h) * 0.015:
-            continue
-        candidates.append((area, contour))
+    keep = np.full_like(ink, 255)
+    line_half = max(2, round(min(crop.shape[:2]) / 140))
 
-    if not candidates:
-        return None
+    # Erase every known vertical/horizontal grid line, including the heavy 3x3
+    # box boundaries.  This is intentionally deterministic for the DC layout.
+    for x in x_lines:
+        cv2.line(keep, (x, 0), (x, keep.shape[0] - 1), 0, line_half * 2 + 1)
+    for y in y_lines:
+        cv2.line(keep, (0, y), (keep.shape[1] - 1, y), 0, line_half * 2 + 1)
 
-    _, contour = max(candidates, key=lambda item: item[0])
-    cv2.drawContours(mask, [contour], -1, 255, -1)
-    digit = cv2.bitwise_and(threshold, threshold, mask=mask)
-    return digit
+    cleaned = cv2.bitwise_and(ink, keep)
+    return cleaned
 
 
-def prepare_digit(digit: np.ndarray) -> np.ndarray:
-    """Prepare one extracted digit for the MNIST-trained 28x28 CNN."""
-    ys, xs = np.where(digit > 0)
-    if len(xs) == 0:
-        raise ValueError("Empty digit mask")
+def tesseract_digit(component: np.ndarray) -> tuple[int, list[str]]:
+    """Recognize one already-isolated printed digit.
 
-    x1, x2 = xs.min(), xs.max() + 1
-    y1, y2 = ys.min(), ys.max() + 1
-    roi = digit[y1:y2, x1:x2]
+    Multiple Tesseract segmentation modes are used because the component is
+    tiny.  We accept the most frequent valid 1..9 result.
+    """
+    white_on_black = component
+    black_on_white = cv2.bitwise_not(white_on_black)
+    variants = [
+        cv2.resize(black_on_white, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC),
+        cv2.resize(
+            cv2.morphologyEx(black_on_white, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8)),
+            None,
+            fx=5,
+            fy=5,
+            interpolation=cv2.INTER_CUBIC,
+        ),
+    ]
 
-    side = max(roi.shape)
-    canvas = np.zeros((side, side), dtype=np.uint8)
-    oy = (side - roi.shape[0]) // 2
-    ox = (side - roi.shape[1]) // 2
-    canvas[oy:oy + roi.shape[0], ox:ox + roi.shape[1]] = roi
-    resized = cv2.resize(canvas, (28, 28), interpolation=cv2.INTER_AREA)
-    return resized.astype(np.float32) / 255.0
+    votes: list[str] = []
+    for image in variants:
+        for psm in (10, 8, 13):
+            text = pytesseract.image_to_string(
+                image,
+                config=f"--psm {psm} -c tessedit_char_whitelist=123456789",
+            ).strip()
+            if len(text) == 1 and text in "123456789":
+                votes.append(text)
+
+    if not votes:
+        return 0, []
+
+    # Deterministic majority vote; ties are resolved by the first observed vote.
+    counts: dict[str, int] = {}
+    for vote in votes:
+        counts[vote] = counts.get(vote, 0) + 1
+    best = max(votes, key=lambda value: counts[value])
+    return int(best), votes
 
 
-def load_cnn(model_path: Path):
-    if not model_path.exists():
-        raise RuntimeError(f"CNN model not found: {model_path}")
-    model = load_model(str(model_path), compile=False)
-    print(f"CNN model loaded: {model_path}")
-    print(f"CNN input shape: {model.input_shape}; output shape: {model.output_shape}")
-    return model
-
-
-def ocr_grid(crop: np.ndarray, model) -> tuple[list[list[int]], dict[str, Any]]:
+def ocr_grid(crop: np.ndarray, x_lines: list[int], y_lines: list[int]) -> tuple[list[list[int]], dict[str, Any], np.ndarray]:
+    """OCR a Sudoku crop after grid-line removal and component detection."""
+    cleaned = build_digit_mask(crop, x_lines, y_lines)
     grid = [[0] * 9 for _ in range(9)]
-    confidence = [[0.0] * 9 for _ in range(9)]
-    recognized = [[""] * 9 for _ in range(9)]
     occupied = 0
+    details: list[dict[str, Any]] = []
+
+    count, labels, stats, centers = cv2.connectedComponentsWithStats(cleaned, 8)
+    for idx in range(1, count):
+        x, y, width, height, area = stats[idx]
+        cx, cy = centers[idx]
+
+        # Printed Sudoku digits in these crops are small, isolated components.
+        # These guards also prevent tiny anti-aliasing specks from becoming clues.
+        if area < 20 or width < 3 or height < 8 or width > 25 or height > 25:
+            continue
+
+        col = int(np.searchsorted(x_lines, cx, side="right") - 1)
+        row = int(np.searchsorted(y_lines, cy, side="right") - 1)
+        if not (0 <= row < 9 and 0 <= col < 9):
+            continue
+
+        pad = 2
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(cleaned.shape[1], x + width + pad)
+        y1 = min(cleaned.shape[0], y + height + pad)
+        component = (labels[y0:y1, x0:x1] == idx).astype(np.uint8) * 255
+
+        digit, votes = tesseract_digit(component)
+        if digit:
+            grid[row][col] = digit
+            occupied += 1
+
+        details.append({
+            "row": row + 1,
+            "column": col + 1,
+            "bbox": [int(x), int(y), int(width), int(height)],
+            "area": int(area),
+            "digit": digit,
+            "votes": votes,
+        })
+
+    return grid, {
+        "engine": "Tesseract OCR on isolated digit components",
+        "layout": "fixed Deccan Chronicle Sudoku board mask",
+        "occupied_cells": occupied,
+        "components": details,
+        "note": "Only the two Sudoku board regions are OCR'd. Grid lines are masked before connected-component OCR; the original source image is never globally resized or normalized.",
+    }, cleaned
+
+
+def draw_grid_debug(crop: np.ndarray, x_lines: list[int], y_lines: list[int], grid: list[list[int]]) -> np.ndarray:
+    debug = crop.copy()
+    for x in x_lines:
+        cv2.line(debug, (x, 0), (x, debug.shape[0] - 1), (0, 0, 255), 1)
+    for y in y_lines:
+        cv2.line(debug, (0, y), (debug.shape[1] - 1, y), (0, 0, 255), 1)
 
     for r in range(9):
         for c in range(9):
-            y1, y2 = round(r * crop.shape[0] / 9), round((r + 1) * crop.shape[0] / 9)
-            x1, x2 = round(c * crop.shape[1] / 9), round((c + 1) * crop.shape[1] / 9)
-            cell = crop[y1:y2, x1:x2]
-            digit = extract_digit(cell)
-            if digit is None:
+            value = grid[r][c]
+            if not value:
                 continue
-
-            sample = prepare_digit(digit)
-            prediction = model.predict(sample.reshape(1, 28, 28, 1), verbose=0)[0]
-            cls = int(np.argmax(prediction))
-            conf = float(prediction[cls])
-
-            # The source model was trained on MNIST classes 0..9. Sudoku has
-            # no zero-valued clue, so class 0 is interpreted as empty/noise.
-            if cls == 0:
-                continue
-
-            grid[r][c] = cls
-            confidence[r][c] = round(conf, 4)
-            recognized[r][c] = MODEL_LABELS[cls]
-            occupied += 1
-
-    return grid, {
-        "engine": "Sotejaswini Sudoku-Solver-OCR CNN",
-        "model": "model-4.h5",
-        "model_source": "https://github.com/Sotejaswini/Sudoku-Solver-OCR",
-        "architecture_source": "MNIST-trained Keras CNN",
-        "occupied_cells": occupied,
-        "confidence": confidence,
-        "recognized": recognized,
-        "note": "Per-cell resize to 28x28 is required by the MNIST model; the full DC source image is never globally resized.",
-    }
+            x1, x2 = x_lines[c], x_lines[c + 1]
+            y1, y2 = y_lines[r], y_lines[r + 1]
+            cv2.putText(
+                debug,
+                str(value),
+                (int((x1 + x2) / 2 - 7), int((y1 + y2) / 2 + 7)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
+    return debug
 
 
 def solution_count(grid: list[list[int]], limit: int = 2) -> int:
@@ -150,8 +220,8 @@ def solution_count(grid: list[list[int]], limit: int = 2) -> int:
         br, bc = (r // 3) * 3, (c // 3) * 3
         return all(board[i][j] != n for i in range(br, br + 3) for j in range(bc, bc + 3))
 
-    def search(count: list[int]) -> None:
-        if count[0] >= limit:
+    def search(found: list[int]) -> None:
+        if found[0] >= limit:
             return
         best = None
         options = None
@@ -164,19 +234,19 @@ def solution_count(grid: list[list[int]], limit: int = 2) -> int:
                     if options is None or len(opts) < len(options):
                         best, options = (r, c), opts
         if best is None:
-            count[0] += 1
+            found[0] += 1
             return
         r, c = best
         for n in options:
             board[r][c] = n
-            search(count)
+            search(found)
             board[r][c] = 0
-            if count[0] >= limit:
+            if found[0] >= limit:
                 return
 
-    count = [0]
-    search(count)
-    return count[0]
+    found = [0]
+    search(found)
+    return found[0]
 
 
 def validate(grid: list[list[int]]) -> dict[str, Any]:
@@ -204,10 +274,9 @@ def validate(grid: list[list[int]]) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Headless DC Sudoku OCR using the Sotejaswini CNN digit model.")
+    parser = argparse.ArgumentParser(description="Headless DC Sudoku OCR using a fixed board mask and Tesseract.")
     parser.add_argument("--date", required=True)
     parser.add_argument("--source", required=True)
-    parser.add_argument("--model", default="dc_test/models/model-4.h5")
     args = parser.parse_args()
 
     root = Path("dc_test") / args.date / "sudoku"
@@ -218,30 +287,45 @@ def main() -> None:
 
     print(f"Source dimensions: {source_w}x{source_h}")
     print("Source normalization: DISABLED")
-    print("OCR engine: Sotejaswini CNN (model-4.h5)")
+    print("OCR strategy: fixed Sudoku board masks -> grid-line removal -> connected components -> Tesseract")
 
-    model = load_cnn(Path(args.model))
+    sx = source_w / CANONICAL_SIZE[0]
+    sy = source_h / CANONICAL_SIZE[1]
     puzzles = []
 
-    for puzzle_id, ref_box in REGIONS.items():
-        crop = crop_region(image, ref_box)
-        crop_path = root / f"{puzzle_id}.png"
+    for puzzle_id, box in BOARD_BOXES.items():
+        scaled = scaled_box(box, source_w, source_h)
+        crop = crop_region(image, scaled)
+        crop_path = root / f"{puzzle_id}-raw-crop.png"
         cv2.imwrite(str(crop_path), crop)
+
+        canonical_lines = GRID_LINES[puzzle_id]
+        x_lines = scaled_lines(canonical_lines["x"], sx)
+        y_lines = scaled_lines(canonical_lines["y"], sy)
+        # Convert canonical board-local coordinates into the current crop size.
+        board_sx = crop.shape[1] / (box[2] - box[0])
+        board_sy = crop.shape[0] / (box[3] - box[1])
+        x_lines = [round(v * board_sx) for v in canonical_lines["x"]]
+        y_lines = [round(v * board_sy) for v in canonical_lines["y"]]
+
         print(f"{puzzle_id}: crop={crop.shape[1]}x{crop.shape[0]}")
 
         try:
-            grid, ocr_meta = ocr_grid(crop, model)
+            grid, ocr_meta, cleaned = ocr_grid(crop, x_lines, y_lines)
             checks = validate(grid)
             error = None
         except Exception as exc:
             grid = [[0] * 9 for _ in range(9)]
             checks = validate(grid)
             ocr_meta = {
-                "engine": "Sotejaswini CNN",
-                "model": "model-4.h5",
+                "engine": "Tesseract OCR",
                 "error": f"{type(exc).__name__}: {exc}",
             }
+            cleaned = build_digit_mask(crop, x_lines, y_lines)
             error = str(exc)
+
+        cv2.imwrite(str(root / f"{puzzle_id}-masked.png"), cleaned)
+        cv2.imwrite(str(root / f"{puzzle_id}-grid-debug.png"), draw_grid_debug(crop, x_lines, y_lines, grid))
 
         print(f"{puzzle_id} grid: {grid}")
         print(f"{puzzle_id} validation: {checks}")
@@ -254,6 +338,8 @@ def main() -> None:
             "ocr": ocr_meta,
             "validation": checks,
             "crop": str(crop_path),
+            "masked": str(root / f"{puzzle_id}-masked.png"),
+            "grid_debug": str(root / f"{puzzle_id}-grid-debug.png"),
             "error": error,
         })
 
@@ -264,8 +350,7 @@ def main() -> None:
         "source_image": str(source_path),
         "source_dimensions": {"width": source_w, "height": source_h},
         "normalization": {"enabled": False},
-        "ocr_engine": "Sotejaswini CNN model-4.h5",
-        "model_source": "https://github.com/Sotejaswini/Sudoku-Solver-OCR",
+        "ocr_engine": "Tesseract on fixed Sudoku masks",
         "puzzles": puzzles,
     }
     (root / "ocr_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -287,8 +372,8 @@ def main() -> None:
     (root / "today.json").write_text(json.dumps(canonical, indent=2) + "\n", encoding="utf-8")
 
     print("PIPELINE STATUS: COMPLETE")
-    for p in puzzles:
-        print(p["title"], p["validation"])
+    for puzzle in puzzles:
+        print(puzzle["title"], puzzle["validation"])
 
 
 if __name__ == "__main__":
