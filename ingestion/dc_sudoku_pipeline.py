@@ -53,57 +53,99 @@ def preprocess(cell: np.ndarray) -> np.ndarray:
     return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
 
 
-def ocr_digit(cell: np.ndarray) -> dict:
-    image = preprocess(cell)
-    ink_ratio = float((image < 128).mean())
-    if ink_ratio < 0.012:
-        return {"digit": 0, "confidence": 0.0}
-
-    votes: list[str] = []
-    confidences: list[float] = []
-    for psm in (10, 8, 13):
-        data = pytesseract.image_to_data(
-            image,
-            config=f"--psm {psm} -c tessedit_char_whitelist=123456789",
-            output_type=pytesseract.Output.DICT,
-        )
-        for text, conf in zip(data["text"], data["conf"]):
-            text = text.strip()
-            try:
-                score = float(conf)
-            except ValueError:
-                score = -1.0
-            if text and text[0] in "123456789" and score >= 0:
-                votes.append(text[0])
-                confidences.append(score)
-                break
-
-    if not votes:
-        return {"digit": 0, "confidence": 0.0}
-
-    counts = {d: votes.count(d) for d in set(votes)}
-    digit = max(counts, key=counts.get)
-    selected = [c for d, c in zip(votes, confidences) if d == digit]
-    return {"digit": int(digit), "confidence": round(float(np.mean(selected)), 1)}
-
-
 def read_grid(crop: np.ndarray) -> tuple[list[list[int]], list[list[float]]]:
+    """OCR the whole Sudoku in one Tesseract invocation.
+
+    Each source cell is placed into a fixed-size montage, preserving its
+    row/column position. Tesseract only sees the non-empty cells, and the
+    detected text boxes are mapped back to the original 9x9 coordinates.
+    """
     h, w = crop.shape[:2]
-    grid: list[list[int]] = []
-    confidence: list[list[float]] = []
+    cell_h, cell_w = h / 9.0, w / 9.0
+
+    tile = 72
+    gap = 8
+    canvas_size = 9 * tile + 8 * gap
+    montage = np.full((canvas_size, canvas_size), 255, dtype=np.uint8)
+    ink_cells: set[tuple[int, int]] = set()
+
     for r in range(9):
-        row, conf_row = [], []
-        y1, y2 = round(r * h / 9), round((r + 1) * h / 9)
+        y1, y2 = round(r * cell_h), round((r + 1) * cell_h)
         for c in range(9):
-            x1, x2 = round(c * w / 9), round((c + 1) * w / 9)
+            x1, x2 = round(c * cell_w), round((c + 1) * cell_w)
             margin_x = max(2, round((x2 - x1) * 0.10))
             margin_y = max(2, round((y2 - y1) * 0.10))
             cell = crop[y1 + margin_y:y2 - margin_y, x1 + margin_x:x2 - margin_x]
-            result = ocr_digit(cell)
-            row.append(result["digit"])
-            conf_row.append(result["confidence"])
-        grid.append(row)
-        confidence.append(conf_row)
+            image = preprocess(cell)
+            ink_ratio = float((image < 128).mean())
+            if ink_ratio < 0.012:
+                continue
+
+            ink_cells.add((r, c))
+            # Keep every OCR tile the same size and center the printed digit.
+            ys, xs = np.where(image < 128)
+            if len(xs) == 0:
+                continue
+            bx1, bx2 = int(xs.min()), int(xs.max()) + 1
+            by1, by2 = int(ys.min()), int(ys.max()) + 1
+            digit = image[by1:by2, bx1:bx2]
+            scale = min((tile - 18) / max(1, digit.shape[1]), (tile - 18) / max(1, digit.shape[0]))
+            nw = max(1, round(digit.shape[1] * scale))
+            nh = max(1, round(digit.shape[0] * scale))
+            digit = cv2.resize(digit, (nw, nh), interpolation=cv2.INTER_AREA)
+
+            ox = c * (tile + gap) + (tile - nw) // 2
+            oy = r * (tile + gap) + (tile - nh) // 2
+            montage[oy:oy + nh, ox:ox + nw] = digit
+
+    grid = [[0 for _ in range(9)] for _ in range(9)]
+    confidence = [[0.0 for _ in range(9)] for _ in range(9)]
+
+    if not ink_cells:
+        return grid, confidence
+
+    try:
+        data = pytesseract.image_to_data(
+            montage,
+            config="--psm 11 -c tessedit_char_whitelist=123456789",
+            output_type=pytesseract.Output.DICT,
+            timeout=30,
+        )
+    except RuntimeError as exc:
+        print(f"WARNING: Tesseract timed out or failed: {exc}")
+        return grid, confidence
+
+    for text, conf, left, top, width, height in zip(
+        data["text"],
+        data["conf"],
+        data["left"],
+        data["top"],
+        data["width"],
+        data["height"],
+    ):
+        text = text.strip()
+        if not text or text[0] not in "123456789":
+            continue
+        try:
+            score = float(conf)
+        except (TypeError, ValueError):
+            continue
+        if score < 0:
+            continue
+
+        cx = float(left) + float(width) / 2.0
+        cy = float(top) + float(height) / 2.0
+        c = min(8, max(0, int(cx // (tile + gap))))
+        r = min(8, max(0, int(cy // (tile + gap))))
+        if (r, c) not in ink_cells:
+            continue
+
+        digit = int(text[0])
+        # Keep the highest-confidence detection if Tesseract reports a tile twice.
+        if score >= confidence[r][c]:
+            grid[r][c] = digit
+            confidence[r][c] = round(score, 1)
+
     return grid, confidence
 
 
