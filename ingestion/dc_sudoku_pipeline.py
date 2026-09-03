@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytesseract
 
-
-# Baseline source layout used by the tested crop coordinates.
 REFERENCE_W = 732
 REFERENCE_H = 606
 REGIONS = {
     "dc-1": (40, 75, 341, 339),
     "dc-2": (383, 70, 689, 338),
 }
+OCR_TIMEOUT = 3
 
 
 def load_image(path: Path) -> np.ndarray:
@@ -26,15 +26,10 @@ def load_image(path: Path) -> np.ndarray:
 
 
 def normalize_source(image: np.ndarray) -> tuple[np.ndarray, dict]:
-    """Normalize the selected source to the tested 732x606 baseline."""
     h, w = image.shape[:2]
     scale_x = REFERENCE_W / w
     scale_y = REFERENCE_H / h
-    normalized = cv2.resize(
-        image,
-        (REFERENCE_W, REFERENCE_H),
-        interpolation=cv2.INTER_AREA,
-    )
+    normalized = cv2.resize(image, (REFERENCE_W, REFERENCE_H), interpolation=cv2.INTER_AREA)
     return normalized, {
         "source_width": w,
         "source_height": h,
@@ -46,106 +41,99 @@ def normalize_source(image: np.ndarray) -> tuple[np.ndarray, dict]:
     }
 
 
-def preprocess(cell: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, None, fx=7, fy=7, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+def remove_grid_lines(crop: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    inv = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 8
+    )
+    h, w = inv.shape
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (max(12, w // 12), 1))
+    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(12, h // 12)))
+    horizontal = cv2.morphologyEx(inv, cv2.MORPH_OPEN, hk)
+    vertical = cv2.morphologyEx(inv, cv2.MORPH_OPEN, vk)
+    lines = cv2.bitwise_or(horizontal, vertical)
+    clean = cv2.bitwise_and(inv, cv2.bitwise_not(lines))
+    return clean
 
 
-def read_grid(crop: np.ndarray) -> tuple[list[list[int]], list[list[float]]]:
-    """OCR the whole Sudoku in one Tesseract invocation.
+def extract_cell(clean: np.ndarray, r: int, c: int) -> np.ndarray:
+    h, w = clean.shape[:2]
+    y1, y2 = round(r * h / 9), round((r + 1) * h / 9)
+    x1, x2 = round(c * w / 9), round((c + 1) * w / 9)
+    mx = max(3, round((x2 - x1) * 0.16))
+    my = max(3, round((y2 - y1) * 0.16))
+    return clean[y1 + my:y2 - my, x1 + mx:x2 - mx]
 
-    Each source cell is placed into a fixed-size montage, preserving its
-    row/column position. Tesseract only sees the non-empty cells, and the
-    detected text boxes are mapped back to the original 9x9 coordinates.
-    """
-    h, w = crop.shape[:2]
-    cell_h, cell_w = h / 9.0, w / 9.0
 
-    tile = 72
-    gap = 8
-    canvas_size = 9 * tile + 8 * gap
-    montage = np.full((canvas_size, canvas_size), 255, dtype=np.uint8)
-    ink_cells: set[tuple[int, int]] = set()
+def has_digit(cell: np.ndarray) -> bool:
+    """Reject empty cells and residual grid artifacts before OCR."""
+    if cell.size == 0:
+        return False
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(cell, 8)
+    cell_area = cell.shape[0] * cell.shape[1]
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if area < max(10, cell_area * 0.015):
+            continue
+        if w <= 2 or h <= 3:
+            continue
+        if area > cell_area * 0.45:
+            continue
+        # Digits have a meaningful 2-D bounding box; long thin remnants are lines.
+        if w / max(h, 1) < 0.15 or w / max(h, 1) > 2.5:
+            continue
+        return True
+    return False
 
-    for r in range(9):
-        y1, y2 = round(r * cell_h), round((r + 1) * cell_h)
-        for c in range(9):
-            x1, x2 = round(c * cell_w), round((c + 1) * cell_w)
-            margin_x = max(2, round((x2 - x1) * 0.10))
-            margin_y = max(2, round((y2 - y1) * 0.10))
-            cell = crop[y1 + margin_y:y2 - margin_y, x1 + margin_x:x2 - margin_x]
-            image = preprocess(cell)
-            ink_ratio = float((image < 128).mean())
-            if ink_ratio < 0.012:
-                continue
 
-            ink_cells.add((r, c))
-            # Keep every OCR tile the same size and center the printed digit.
-            ys, xs = np.where(image < 128)
-            if len(xs) == 0:
-                continue
-            bx1, bx2 = int(xs.min()), int(xs.max()) + 1
-            by1, by2 = int(ys.min()), int(ys.max()) + 1
-            digit = image[by1:by2, bx1:bx2]
-            scale = min((tile - 18) / max(1, digit.shape[1]), (tile - 18) / max(1, digit.shape[0]))
-            nw = max(1, round(digit.shape[1] * scale))
-            nh = max(1, round(digit.shape[0] * scale))
-            digit = cv2.resize(digit, (nw, nh), interpolation=cv2.INTER_AREA)
+def ocr_cell(cell: np.ndarray) -> tuple[int, float]:
+    if not has_digit(cell):
+        return 0, 0.0
 
-            ox = c * (tile + gap) + (tile - nw) // 2
-            oy = r * (tile + gap) + (tile - nh) // 2
-            montage[oy:oy + nh, ox:ox + nw] = digit
-
-    grid = [[0 for _ in range(9)] for _ in range(9)]
-    confidence = [[0.0 for _ in range(9)] for _ in range(9)]
-
-    if not ink_cells:
-        return grid, confidence
-
+    image = cv2.resize(cell, None, fx=8, fy=8, interpolation=cv2.INTER_CUBIC)
+    image = cv2.copyMakeBorder(image, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=0)
+    config = "--psm 10 -c tessedit_char_whitelist=123456789"
     try:
         data = pytesseract.image_to_data(
-            montage,
-            config="--psm 11 -c tessedit_char_whitelist=123456789",
+            image,
+            config=config,
             output_type=pytesseract.Output.DICT,
-            timeout=30,
+            timeout=OCR_TIMEOUT,
         )
-    except RuntimeError as exc:
-        print(f"WARNING: Tesseract timed out or failed: {exc}")
-        return grid, confidence
+    except (RuntimeError, pytesseract.TesseractError):
+        return 0, 0.0
 
-    for text, conf, left, top, width, height in zip(
-        data["text"],
-        data["conf"],
-        data["left"],
-        data["top"],
-        data["width"],
-        data["height"],
-    ):
+    best_digit, best_conf = 0, 0.0
+    for text, conf in zip(data["text"], data["conf"]):
         text = text.strip()
-        if not text or text[0] not in "123456789":
-            continue
         try:
             score = float(conf)
         except (TypeError, ValueError):
             continue
-        if score < 0:
-            continue
+        if len(text) == 1 and text in "123456789" and score > best_conf:
+            best_digit, best_conf = int(text), score
+    return best_digit, round(best_conf, 1)
 
-        cx = float(left) + float(width) / 2.0
-        cy = float(top) + float(height) / 2.0
-        c = min(8, max(0, int(cx // (tile + gap))))
-        r = min(8, max(0, int(cy // (tile + gap))))
-        if (r, c) not in ink_cells:
-            continue
 
-        digit = int(text[0])
-        # Keep the highest-confidence detection if Tesseract reports a tile twice.
-        if score >= confidence[r][c]:
+def read_grid(crop: np.ndarray) -> tuple[list[list[int]], list[list[float]]]:
+    clean = remove_grid_lines(crop)
+    grid = [[0] * 9 for _ in range(9)]
+    confidence = [[0.0] * 9 for _ in range(9)]
+
+    tasks = {}
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        for r in range(9):
+            for c in range(9):
+                cell = extract_cell(clean, r, c)
+                tasks[pool.submit(ocr_cell, cell)] = (r, c)
+        for future in as_completed(tasks):
+            r, c = tasks[future]
+            try:
+                digit, conf = future.result()
+            except Exception:
+                digit, conf = 0, 0.0
             grid[r][c] = digit
-            confidence[r][c] = round(score, 1)
-
+            confidence[r][c] = conf
     return grid, confidence
 
 
@@ -218,7 +206,6 @@ def main() -> None:
     root.mkdir(parents=True, exist_ok=True)
     source_path = Path(args.source)
     image = load_image(source_path)
-
     normalized, normalization = normalize_source(image)
     normalized_path = root / "sudoku_source_normalized.jpg"
     cv2.imwrite(str(normalized_path), normalized)
@@ -246,34 +233,22 @@ def main() -> None:
         "edition": "Hyderabad",
         "source": "Deccan Chronicle",
         "source_image": str(source_path),
-        "source_dimensions": {
-            "width": normalization["source_width"],
-            "height": normalization["source_height"],
-        },
+        "source_dimensions": {"width": normalization["source_width"], "height": normalization["source_height"]},
         "normalization": normalization,
         "normalized_source": str(normalized_path),
         "puzzles": puzzles,
     }
     (root / "ocr_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-
-    # Verification remains metadata only. The Action publishes the OCR result
-    # regardless of the verification flag.
     canonical = {
         "date": result["date"],
         "edition": result["edition"],
         "source": result["source"],
         "puzzles": [
-            {
-                "id": p["id"],
-                "title": p["title"],
-                "verified": bool(p.get("verified", False)),
-                "grid": p["grid"],
-            }
+            {"id": p["id"], "title": p["title"], "verified": bool(p.get("verified", False)), "grid": p["grid"]}
             for p in result["puzzles"]
         ],
     }
     (root / "today.json").write_text(json.dumps(canonical, indent=2) + "\n", encoding="utf-8")
-
     print("PIPELINE STATUS: COMPLETE")
     print(f"Source dimensions: {normalization['source_width']}x{normalization['source_height']}")
     print(f"Normalized to: {REFERENCE_W}x{REFERENCE_H}")
