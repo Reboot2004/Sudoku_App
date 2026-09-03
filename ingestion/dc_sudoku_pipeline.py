@@ -7,17 +7,15 @@ from typing import Any
 
 import cv2
 import numpy as np
-from rapidocr import RapidOCR
+from sudoku_ocr import Board
 
-# These are retained as approximate source-image regions. The source image is
-# deliberately kept at its original dimensions; no global resize/normalization
-# is performed before cropping.
+# Approximate source-image regions for the two DC Sudoku boards.
+# The source image is deliberately kept at its original dimensions; no
+# global resize/normalization is performed before cropping.
 REGIONS = {
     "dc-1": (40, 75, 341, 339),
     "dc-2": (383, 70, 689, 338),
 }
-
-MIN_DIGIT_SCORE = 0.35
 
 
 def load_image(path: Path) -> np.ndarray:
@@ -39,81 +37,26 @@ def crop_region(image: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray
     return image[y1:y2, x1:x2]
 
 
-def extract_cell(crop: np.ndarray, r: int, c: int) -> np.ndarray:
-    h, w = crop.shape[:2]
-    y1 = round(r * h / 9)
-    y2 = round((r + 1) * h / 9)
-    x1 = round(c * w / 9)
-    x2 = round((c + 1) * w / 9)
-    # Small inset prevents the outer grid line from being passed to OCR,
-    # without altering the source image itself.
-    mx = max(2, round((x2 - x1) * 0.08))
-    my = max(2, round((y2 - y1) * 0.08))
-    cell = crop[y1 + my:y2 - my, x1 + mx:x2 - mx]
-    if cell.size == 0:
-        raise RuntimeError(f"Empty cell R{r + 1}C{c + 1}")
-    return cell
+def board_to_grid(value: Any) -> list[list[int]]:
+    """Convert sudoku-ocr's board_value into a plain 9x9 integer list."""
+    grid = np.asarray(value)
+    if grid.shape != (9, 9):
+        raise RuntimeError(f"sudoku-ocr returned unexpected board shape: {grid.shape}")
+    return [[int(cell) for cell in row] for row in grid.tolist()]
 
 
-def recognize_digit(engine: RapidOCR, cell: np.ndarray) -> tuple[int, float, str]:
-    """Recognize a single Sudoku cell using RapidOCR recognition only.
+def ocr_grid(crop_path: Path) -> tuple[list[list[int]], dict[str, Any]]:
+    """Run the sudoku-ocr PyPI package directly on the original Sudoku crop."""
+    board = Board()
+    board.prepare_img(str(crop_path))
+    board.ocr_sudoku()
 
-    Detection is disabled because each input is already a single cell. The
-    recognized text is accepted only when it is exactly one digit 1..9.
-    """
-    try:
-        result = engine(cell, use_det=False, use_cls=True, use_rec=True)
-    except Exception:
-        return 0, 0.0, ""
-
-    texts: list[str] = []
-    scores: list[float] = []
-
-    # RapidOCR's current TextRecOutput exposes txts and scores. Keep a small
-    # compatibility fallback for older result representations.
-    raw_txts = getattr(result, "txts", None)
-    raw_scores = getattr(result, "scores", None)
-    if raw_txts is not None and raw_scores is not None:
-        texts = list(raw_txts)
-        scores = [float(x) for x in raw_scores]
-    else:
-        data = getattr(result, "res", None)
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    texts.append(str(item[0]))
-                    try:
-                        scores.append(float(item[1]))
-                    except (TypeError, ValueError):
-                        scores.append(0.0)
-
-    best_digit, best_score, best_text = 0, 0.0, ""
-    for text, score in zip(texts, scores):
-        clean = str(text).strip()
-        if len(clean) != 1 or clean not in "123456789":
-            continue
-        if score > best_score:
-            best_digit, best_score, best_text = int(clean), float(score), clean
-
-    if best_score < MIN_DIGIT_SCORE:
-        return 0, round(best_score, 4), best_text
-    return best_digit, round(best_score, 4), best_text
-
-
-def read_grid(crop: np.ndarray, engine: RapidOCR) -> tuple[list[list[int]], list[list[float]], list[list[str]]]:
-    grid = [[0] * 9 for _ in range(9)]
-    confidence = [[0.0] * 9 for _ in range(9)]
-    raw = [[""] * 9 for _ in range(9)]
-
-    for r in range(9):
-        for c in range(9):
-            cell = extract_cell(crop, r, c)
-            digit, score, text = recognize_digit(engine, cell)
-            grid[r][c] = digit
-            confidence[r][c] = score
-            raw[r][c] = text
-
-    return grid, confidence, raw
+    grid = board_to_grid(board.board_value)
+    return grid, {
+        "engine": "sudoku-ocr",
+        "package": "sudoku-ocr",
+        "api": ["Board.prepare_img", "Board.ocr_sudoku", "Board.board_value"],
+    }
 
 
 def solution_count(grid: list[list[int]], limit: int = 2) -> int:
@@ -181,7 +124,7 @@ def validate(grid: list[list[int]]) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Headless DC Sudoku crop/OCR pipeline using RapidOCR.")
+    parser = argparse.ArgumentParser(description="Headless DC Sudoku crop/OCR pipeline using sudoku-ocr.")
     parser.add_argument("--date", required=True)
     parser.add_argument("--source", required=True)
     args = parser.parse_args()
@@ -192,29 +135,43 @@ def main() -> None:
     image = load_image(source_path)
     source_h, source_w = image.shape[:2]
 
-    # Do not normalize/resize the source image.
     print(f"Source dimensions: {source_w}x{source_h}")
     print("Source normalization: DISABLED")
+    print("OCR engine: sudoku-ocr (PyPI)")
 
-    engine = RapidOCR()
     puzzles = []
-
     for puzzle_id, ref_box in REGIONS.items():
         crop = crop_region(image, ref_box)
         crop_path = root / f"{puzzle_id}.png"
         cv2.imwrite(str(crop_path), crop)
+        print(f"{puzzle_id}: crop={crop.shape[1]}x{crop.shape[0]}")
 
-        grid, confidence, raw = read_grid(crop, engine)
-        checks = validate(grid)
+        try:
+            grid, ocr_meta = ocr_grid(crop_path)
+            checks = validate(grid)
+            error = None
+        except Exception as exc:
+            grid = [[0] * 9 for _ in range(9)]
+            checks = validate(grid)
+            ocr_meta = {
+                "engine": "sudoku-ocr",
+                "package": "sudoku-ocr",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            error = str(exc)
+
+        print(f"{puzzle_id} grid: {grid}")
+        print(f"{puzzle_id} validation: {checks}")
+
         puzzles.append({
             "id": puzzle_id,
             "title": "Sudoku 1" if puzzle_id == "dc-1" else "Sudoku 2",
             "verified": bool(checks["valid"] and checks["unique"]),
             "grid": grid,
-            "ocr_confidence": confidence,
-            "ocr_raw": raw,
+            "ocr": ocr_meta,
             "validation": checks,
             "crop": str(crop_path),
+            "error": error,
         })
 
     result = {
@@ -224,12 +181,7 @@ def main() -> None:
         "source_image": str(source_path),
         "source_dimensions": {"width": source_w, "height": source_h},
         "normalization": {"enabled": False},
-        "ocr_engine": {
-            "name": "RapidOCR",
-            "engine": "ONNX Runtime (default)",
-            "recognition_only": True,
-            "minimum_digit_score": MIN_DIGIT_SCORE,
-        },
+        "ocr_engine": "sudoku-ocr",
         "puzzles": puzzles,
     }
     (root / "ocr_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
