@@ -18,6 +18,7 @@ permissions:
 
 env:
   TZ: Asia/Kolkata
+  OCR_SCALE: "4"
 
 jobs:
   ingest:
@@ -70,7 +71,7 @@ jobs:
           PY
 
       # Detection is intentionally unchanged. It finds and saves the best
-      # 729x600-ish DC Sudoku source image as sudoku_source.jpg.
+      # DC Sudoku source image as sudoku_source.jpg.
       - name: Detect DC Sudoku source image
         run: |
           python ingestion/dc_sudoku_detect.py \
@@ -98,9 +99,10 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: Crop Sudoku images and run best-effort cell OCR
+      - name: Crop Sudoku images and run 4x OCR working copy
         shell: bash
         run: |
+          echo "OCR working scale: ${OCR_SCALE}x"
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
             --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg"
