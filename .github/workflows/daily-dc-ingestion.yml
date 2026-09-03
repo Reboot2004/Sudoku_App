@@ -23,6 +23,7 @@ jobs:
   ingest:
     name: Detect, crop, OCR and validate DC Sudoku
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
