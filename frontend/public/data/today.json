@@ -113,11 +113,11 @@
     {
       "id": "dc-2",
       "title": "Sudoku 2",
-      "verified": false,
+      "verified": true,
       "image": "/data/dc/2026-09-04/dc-2.jpg",
       "grid": [
         [
-          0,
+          9,
           0,
           0,
           0,
@@ -144,7 +144,7 @@
           0,
           4,
           0,
-          0,
+          9,
           0,
           2,
           0
