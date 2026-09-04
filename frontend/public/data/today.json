@@ -6,7 +6,7 @@
     {
       "id": "dc-1",
       "title": "Sudoku 1",
-      "verified": false,
+      "verified": true,
       "image": "/data/dc/2026-09-04/dc-1.jpg",
       "grid": [
         [
@@ -51,7 +51,7 @@
           0,
           0,
           0,
-          0
+          9
         ],
         [
           0,
