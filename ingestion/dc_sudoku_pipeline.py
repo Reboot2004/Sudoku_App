@@ -35,6 +35,8 @@ OCR_UPSCALE = 3          # working upscale for a single cell (was 4x, amplified 
 LINE_INSET_FRAC = 0.14   # inset from detected line centres (excludes 2-3px borders)
 EMPTY_INK_FRAC = 0.055   # below this (after cleaning) -> empty without calling Tesseract
 MIN_CONF = 30.0          # minimum Tesseract confidence to accept a vote
+SINGLE_CONF = 40.0       # single (unconfirmed) vote accepted at/above this;
+                         # CI 2026-09-04: true 9s often yield exactly one vote
 
 
 def load_image(path: Path) -> np.ndarray:
@@ -261,8 +263,13 @@ def ocr_cell(cell_gray: np.ndarray) -> tuple[int, float, list[str], float, str]:
         counts[v] = counts.get(v, 0) + 1
     best = max(counts, key=lambda k: (counts[k], np.mean([c for v, c in zip(votes, confs) if v == k])))
     best_confs = [c for v, c in zip(votes, confs) if v == best]
-    # require agreement: >=2 votes, or a single strong vote
-    if len([v for v in votes if v == best]) < 2 and max(best_confs) < 60:
+    # require agreement: >=2 votes, a single vote at/above SINGLE_CONF, or a
+    # single vote backed by a strong digit-sized blob (area>=5% of the cell).
+    # Cells reaching this point already passed ink + blob gates (CI empties
+    # measure ink 0.000), so specks cannot sneak in as singles; true 9s often
+    # yield exactly one Tesseract vote.
+    n_best = len([v for v in votes if v == best])
+    if n_best < 2 and max(best_confs) < SINGLE_CONF and area_frac < 0.05:
         return 0, 0.0, votes, ink, "empty-noagreement"
     conf01 = round(float(np.mean(best_confs)) / 100.0, 4)
     return int(best), conf01, votes, ink, "ocr"
