@@ -18,7 +18,6 @@ permissions:
 
 env:
   TZ: Asia/Kolkata
-  OCR_SCALE: "4"
 
 jobs:
   ingest:
@@ -57,7 +56,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           tesseract --version | head -n 1
           python -m pip install --upgrade "pip<25"
           pip install "requests<3" "numpy<2" "opencv-python" "pytesseract"
@@ -68,6 +67,7 @@ jobs:
           print("OpenCV:", cv2.__version__)
           print("NumPy:", numpy.__version__)
           print("pytesseract:", pytesseract.__version__)
+          print("Tesseract:", str(pytesseract.get_tesseract_version()).strip())
           PY
 
       # Detection is intentionally unchanged. It finds and saves the best
@@ -99,10 +99,9 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: Crop Sudoku images and run 4x OCR working copy
+      - name: Crop Sudoku images and run OCR (dynamic grid lines)
         shell: bash
         run: |
-          echo "OCR working scale: ${OCR_SCALE}x"
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
             --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg"
@@ -120,7 +119,20 @@ jobs:
         shell: bash
         run: |
           echo "=== OCR / validation result ==="
-          cat "dc_test/${{ steps.date.outputs.date }}/sudoku/ocr_result.json"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          date = "${{ steps.date.outputs.date }}"
+          d = json.loads((Path("dc_test") / date / "sudoku" / "ocr_result.json").read_text())
+          for p in d["puzzles"]:
+              clues = sum(1 for row in p["grid"] for v in row if v)
+              print(f"--- {p['id']} verified={p['verified']} clues={clues} "
+                    f"lines={p['ocr']['line_method']} repair={p['ocr'].get('repair') or 'none'}")
+              for row in p["grid"]:
+                  print(" ".join(str(v) for v in row))
+              print(f"validation={p['validation']}")
+          PY
+          ls -lh "dc_test/${{ steps.date.outputs.date }}/sudoku/"
 
       - name: Generate canonical daily JSON
         shell: bash
