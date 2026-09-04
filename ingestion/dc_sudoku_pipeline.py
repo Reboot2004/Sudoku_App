@@ -109,6 +109,26 @@ def _lines_ok(xs: list[float], ys: list[float], w: int, h: int) -> bool:
     return True
 
 
+def _snap_edge(lines: list[float], edge: float) -> list[float]:
+    """Snap a trailing/leading grid line to the image edge when it is close to
+    the edge but leaves an anomalously short end cell (CI 2026-09-04 dc-1:
+    right border found 4px inside, last column squeezed 25.5px vs 33 median,
+    clipping R4C9's 9). Conservative: only fires within half a median cell of
+    the edge with a <85%-of-median end gap."""
+    out = list(lines)
+    if len(out) != 10:
+        return out
+    gaps = [b - a for a, b in zip(out, out[1:])]
+    med = float(np.median(gaps))
+    if med <= 0:
+        return out
+    if out[-1] < edge - 1 and (edge - out[-1]) < 0.5 * med and gaps[-1] < 0.85 * med:
+        out[-1] = edge
+    if out[0] > 1 and out[0] < 0.5 * med and gaps[0] < 0.85 * med:
+        out[0] = 0.0
+    return out
+
+
 def detect_grid_lines(crop_bgr: np.ndarray) -> tuple[list[float], list[float], str]:
     """Return (x_lines, y_lines) in crop pixels + method name."""
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
@@ -133,6 +153,8 @@ def detect_grid_lines(crop_bgr: np.ndarray) -> tuple[list[float], list[float], s
         # clamp into image
         xs = [min(max(0.0, x), float(w - 1)) for x in xs]
         ys = [min(max(0.0, y), float(h - 1)) for y in ys]
+        xs = _snap_edge(xs, float(w - 1))
+        ys = _snap_edge(ys, float(h - 1))
         return xs, ys, "morphology"
     # fallback: uniform split (never crash the daily job on detection)
     xs = [i * (w - 1) / 9.0 for i in range(10)]
