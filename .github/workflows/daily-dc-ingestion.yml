@@ -186,6 +186,16 @@ jobs:
           git commit -m "data: update DC Sudoku for ${{ steps.date.outputs.date }}"
           git push origin HEAD:main
 
+      - name: Purge CDN cache for daily data
+        continue-on-error: true
+        shell: bash
+        run: |
+          DATE="${{ steps.date.outputs.date }}"
+          for f in "frontend/public/data/today.json" "frontend/public/data/dc/$DATE/dc-1.jpg" "frontend/public/data/dc/$DATE/dc-2.jpg"; do
+            curl -s -o /dev/null -w "purge $f: %{http_code}\n" \
+              "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/$f"
+          done
+
       - name: Upload complete ingestion artifacts
         uses: actions/upload-artifact@v7
         with:
