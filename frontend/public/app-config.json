@@ -1,0 +1,10 @@
+{
+  "repo": "Reboot2004/Sudoku_App",
+  "manifestPath": "app-manifest.json",
+  "deployBranch": "gh-pages",
+  "remoteBases": [
+    "https://reboot2004.github.io/Sudoku_App",
+    "https://cdn.jsdelivr.net/gh/Reboot2004/Sudoku_App@gh-pages",
+    "https://raw.githubusercontent.com/Reboot2004/Sudoku_App/gh-pages"
+  ]
+}

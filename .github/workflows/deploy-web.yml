@@ -1,0 +1,71 @@
+name: Deploy Web App (OTA channel)
+
+# Publishes frontend/dist to the gh-pages branch on every frontend change.
+# The OTA loader inside installed APKs fetches app-manifest.json from this
+# branch (via GitHub Pages / jsDelivr / raw.githubusercontent) and runs the
+# newest app modules without a reinstall.
+#
+# One-time setup: repository Settings -> Pages -> Deploy from branch -> gh-pages.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '!frontend/dist/**'
+      - '!frontend/android/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ota-web-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and publish OTA web bundle
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build web app and OTA manifest
+        run: npm run build
+
+      - name: Show OTA manifest
+        shell: bash
+        run: |
+          cat dist/app-manifest.json
+          ls -lh dist dist/assets
+
+      - name: Publish to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: frontend/dist
+          publish_branch: gh-pages
+          commit_message: 'ota: publish web bundle for ${{ github.sha }}'
+
+      - name: Purge CDN cache for OTA manifest
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -s -o /dev/null -w "purge app-manifest.json: %{http_code}\n" \
+            "https://purge.jsdelivr.net/gh/${{ github.repository }}@gh-pages/app-manifest.json"
