@@ -9,4 +9,5 @@
 - No 'check your puzzle' import warning.
 - My Sudoku is for TOI/printed puzzles; Deccan Chronicle is daily backend-fed data.
 - Every control carries a title tooltip; the ? button opens a help guide (usage steps, button glossary, board legend, tips).
-- Nudge highlights the row/column/box to look at and the number to find (2-3 candidate cells), never the exact cell; pressing Nudge again cycles to a different nudge. Hint still reveals one exact move.
+- Nudge is deterministic and fills: naked single (single purple cell — one candidate) first, else hidden single (number locked to a row/col/box, 2-3 purple cells). `Fill hint` places the nudge's cell. `Got it` dismisses.
+- Layout fits one screen (flex 100dvh, board scales to vh); no page scroll.

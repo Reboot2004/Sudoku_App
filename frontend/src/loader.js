@@ -5,7 +5,9 @@
 import { pickChannel, resolveAsset, isValidManifest, isNewer } from './update-policy.js';
 
 const TIMEOUT_MS = 6000;
-const PIN_KEY = 'dcsudoku.appPin'; // 'local' | 'remote' | null
+const PIN_KEY = 'dcsudoku.appPin'; // 'local' | 'remote' | null (legacy simple pin)
+const PINNED_KEY = 'dcsudoku.pinnedManifest'; // JSON {manifest, base, url} when user pins/rollbacks to a specific version
+const HISTORY_KEY = 'dcsudoku.versionHistory'; // [{version, build, builtAt, manifest, base, url}]
 const META_KEY = 'dcsudoku.appMeta'; // last running { version, channel }
 const LOCAL_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
 
@@ -48,6 +50,29 @@ function defaultRemoteBases(cfg) {
     `https://cdn.jsdelivr.net/gh/${cfg.repo}@${branch}`,
     `https://raw.githubusercontent.com/${cfg.repo}/${branch}`,
   ];
+}
+
+function readJson(key){
+  try{const v=localStorage.getItem(key);return v?JSON.parse(v):null;}catch{return null;}
+}
+function writeJson(key,val){
+  try{localStorage.setItem(key, JSON.stringify(val));}catch{}
+}
+function pushHistory(entry){
+  try{
+    const list = readJson(HISTORY_KEY) || [];
+    const key = `${entry.manifest.version}@${entry.manifest.build||''}@${entry.manifest.builtAt||''}`;
+    const next = [entry, ...list.filter(e=> `${e.manifest.version}@${e.manifest.build||''}@${e.manifest.builtAt||''}`!==key)];
+    writeJson(HISTORY_KEY, next.slice(0,5));
+  }catch{}
+}
+function readHistory(){
+  const list = readJson(HISTORY_KEY);
+  return Array.isArray(list)? list.filter(e=>e&&isValidManifest(e.manifest)) : [];
+}
+function readPinned(){
+  const p = readJson(PINNED_KEY);
+  return p && isValidManifest(p.manifest) ? p : null;
 }
 
 function splash(msg) {
@@ -119,23 +144,30 @@ function updatesMenu(current, actions) {
   m.id = 'ota-menu';
   m.style.cssText =
     'position:fixed;right:8px;bottom:44px;z-index:10000;background:#fff;color:#14232d;border:1px solid #c9d6dd;' +
-    'border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.2);padding:8px;min-width:210px;' +
+    'border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.2);padding:8px;min-width:210px;max-width:280px;max-height:60vh;overflow:auto;' +
     'font-family:system-ui,sans-serif;font-size:13px;';
   const pin = current.pin || 'auto';
+  const pinned = current.pinnedVersion ? `pinned v${current.pinnedVersion}` : pin;
   const head = document.createElement('div');
   head.style.cssText = 'font-weight:800;margin:2px 4px 8px';
-  head.textContent = `App updates · ${current.version} (${current.channel})`;
+  head.textContent = `App updates · ${current.version} (${current.channel}${current.pinnedVersion?` → v${current.pinnedVersion}`:''})`;
   m.appendChild(head);
   const sub = document.createElement('div');
   sub.style.cssText = 'font-size:11px;color:#5d707d;margin:0 4px 8px';
-  sub.textContent = `Channel: ${pin}. New builds publish here automatically; no reinstall needed.`;
+  sub.textContent = `Channel: ${pinned}. New builds publish here automatically; no reinstall needed.`;
   m.appendChild(sub);
-  const mk = (text, fn) => {
+  if(current.otaWarn){
+    const w=document.createElement('div');
+    w.className='ota-warn';
+    w.textContent=current.otaWarn;
+    m.appendChild(w);
+  }
+  const mk = (text, fn, opts={}) => {
     const b = document.createElement('button');
     b.textContent = text;
     b.style.cssText =
       'display:block;width:100%;text-align:left;border:1px solid #c8d5dc;background:#fff;border-radius:8px;' +
-      'padding:8px;margin-top:6px;font-weight:700;cursor:pointer;';
+      'padding:8px;margin-top:6px;font-weight:700;cursor:pointer;'+(opts.danger?'color:#8d2f2f;border-color:#e6a3a3;background:#fff0f0;':'');
     b.addEventListener('click', () => {
       m.remove();
       fn();
@@ -143,7 +175,24 @@ function updatesMenu(current, actions) {
     m.appendChild(b);
   };
   mk('Check for update now', actions.check);
-  mk(pin === 'local' ? 'Follow remote updates (auto)' : 'Pin to bundled version (offline)', actions.togglePin);
+  if(current.pinnedVersion){
+    mk(`Unpin — follow latest (currently pinned v${current.pinnedVersion})`, actions.clearPin);
+  } else {
+    mk(pin === 'local' ? 'Follow remote updates (auto)' : 'Pin this version (stay here — rollback lock)', actions.pinCurrent);
+  }
+  if(pin !== 'local') mk('Use built-in bundled version (offline)', actions.pinLocal);
+  else mk('Follow remote updates (auto)', actions.clearPin);
+  // history rollbacks
+  if(Array.isArray(current.history) && current.history.length>1){
+    const sep=document.createElement('div');
+    sep.style.cssText='font-size:11px;font-weight:800;color:#5d707d;margin:10px 4px 4px;border-top:1px solid #e6eef2;padding-top:8px';
+    sep.textContent='Rollback to previous:';
+    m.appendChild(sep);
+    for(const h of current.history.slice(0,4)){
+      if(h.manifest.version===current.version && h.manifest.build===current.build) continue;
+      mk(`↩ v${h.manifest.version} ${h.manifest.build?`(${h.manifest.build})`:''} · ${h.manifest.builtAt?h.manifest.builtAt.slice(0,10):''}`, ()=>actions.rollback(h));
+    }
+  }
   mk('Reload app', actions.reload);
   const close = document.createElement('button');
   close.textContent = 'Close';
@@ -171,6 +220,9 @@ async function boot() {
   } catch {
     pin = null;
   }
+  let pinned = readPinned();
+  // ?app=local/remote clears a pinned version
+  if(queryForce) pinned = null;
   const force = queryForce || pin;
 
   let cfg = { ...DEFAULT_CONFIG };
@@ -201,7 +253,20 @@ async function boot() {
     for (const r of results) if (r) remotes.push(r);
   }
 
-  const choice = pickChannel({ local: localManifest, remotes, force });
+  let choice;
+  let pinnedActive = false;
+  if(pinned && force!=='local' && !queryForce){
+    // verify pinned still resolvable; if not, fall through to normal pick
+    try{
+      const assets = resolveAsset(pinned.manifest, pinned.url);
+      void assets;
+      choice = { channel:'pinned', manifest:pinned.manifest, base:pinned.base, url:pinned.url };
+      pinnedActive = true;
+    }catch{ pinnedActive=false; }
+  }
+  if(!pinnedActive){
+    choice = pickChannel({ local: localManifest, remotes, force });
+  }
   let jsUrl = null;
   let cssUrl = null;
   let channel = choice.channel;
@@ -209,7 +274,11 @@ async function boot() {
   let runningManifest = choice.manifest;
 
   try {
-    if (choice.channel === 'remote') {
+    if (choice.channel === 'pinned') {
+      const assets = resolveAsset(choice.manifest, choice.url);
+      jsUrl = assets.js;
+      cssUrl = assets.css;
+    } else if (choice.channel === 'remote') {
       const remoteUrl = remotes.find((r) => r.manifest === choice.manifest)?.url;
       const assets = resolveAsset(choice.manifest, remoteUrl);
       jsUrl = assets.js;
@@ -239,14 +308,25 @@ async function boot() {
   const markBooted = () => {
     const el = document.querySelector('#app');
     if (el) el.dataset.booted = '1';
+    // push running version to history for rollback
+    try{
+      const histUrl = choice.channel==='pinned'? choice.url : choice.channel==='remote'? remotes.find(r=>r.manifest===choice.manifest)?.url : localUrl;
+      const histBase = choice.base ?? null;
+      pushHistory({ manifest: runningManifest, base: histBase, url: histUrl });
+    }catch{}
+    const hist = readHistory();
+    const pinnedVer = pinned ? pinned.manifest.version : null;
     try {
-      window.__DC_APP__ = { version, channel, pin: pin || 'auto' };
-      localStorage.setItem(META_KEY, JSON.stringify({ version, channel }));
+      window.__DC_APP__ = { version, channel, pin: pin || 'auto', pinnedVersion: pinnedVer, build: runningManifest.build, history: hist };
+      localStorage.setItem(META_KEY, JSON.stringify({ version, channel, pinnedVersion: pinnedVer }));
     } catch {
       /* ignore */
     }
+    let warn=null;
+    if(choice.channel==='local' && remotes.length && isNewer(remotes[0]&&remotes[0].manifest, runningManifest)) warn='Newer version available — use Updates to switch.';
+    if(choice.channel==='pinned') warn=`Pinned to v${pinnedVer} — Updates → Unpin to follow latest.`;
     badge(version, channel, () =>
-      updatesMenu({ version, channel, pin: pin || 'auto' }, menuActions()),
+      updatesMenu({ version, channel, pin: pin || 'auto', pinnedVersion: pinnedVer, build: runningManifest.build, history: hist, otaWarn: warn }, menuActions()),
     );
   };
 
@@ -266,13 +346,25 @@ async function boot() {
         toast('Already up to date.');
       }
     },
-    togglePin: () => {
-      try {
-        if (pin === 'local') localStorage.removeItem(PIN_KEY);
-        else localStorage.setItem(PIN_KEY, 'local');
-      } catch {
-        /* ignore */
-      }
+    pinCurrent: () => {
+      try{
+        const curUrl = choice.channel==='pinned'? choice.url : choice.channel==='remote'? remotes.find(r=>r.manifest===choice.manifest)?.url : localUrl;
+        const curBase = choice.base ?? null;
+        writeJson(PINNED_KEY, { manifest: runningManifest, base: curBase, url: curUrl });
+        localStorage.removeItem(PIN_KEY);
+      }catch{}
+      location.reload();
+    },
+    clearPin: () => {
+      try{ localStorage.removeItem(PINNED_KEY); localStorage.removeItem(PIN_KEY);}catch{}
+      location.reload();
+    },
+    pinLocal: () => {
+      try{ localStorage.setItem(PIN_KEY,'local'); localStorage.removeItem(PINNED_KEY);}catch{}
+      location.reload();
+    },
+    rollback: (entry) => {
+      try{ writeJson(PINNED_KEY, entry); localStorage.removeItem(PIN_KEY);}catch{}
       location.reload();
     },
     reload: () => location.reload(),
@@ -295,8 +387,8 @@ async function boot() {
     }
     throw new Error('no bundle found');
   } catch (e) {
-    // Remote failed after being selected -> fall back to bundled code.
-    if (channel === 'remote') {
+    // Remote/pinned failed after being selected -> fall back to bundled code.
+    if (channel === 'remote' || channel === 'pinned') {
       try {
         if (localManifest.js) {
           const assets = resolveAsset(localManifest, localUrl);
