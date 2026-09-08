@@ -1,17 +1,17 @@
 {
   "index.html": {
-    "file": "assets/index-BZJroRF1.js",
+    "file": "assets/index-BTzO43eV.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true
   },
   "src/main.js": {
-    "file": "assets/app-FCkldpAS.js",
+    "file": "assets/app-CdEu6Nvj.js",
     "name": "app",
     "src": "src/main.js",
     "isEntry": true,
     "css": [
-      "assets/app-CNPwTRt0.css"
+      "assets/app-C-4pXKmo.css"
     ]
   }
 }
