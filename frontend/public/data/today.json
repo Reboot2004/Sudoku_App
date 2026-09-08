@@ -6,14 +6,14 @@
     {
       "id": "dc-1",
       "title": "Sudoku 1",
-      "verified": true,
+      "verified": false,
       "image": "/data/dc/2026-09-08/dc-1.jpg",
       "grid": [
         [
           7,
           0,
           0,
-          9,
+          0,
           1,
           5,
           0,
