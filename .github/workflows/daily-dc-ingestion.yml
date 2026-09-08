@@ -173,6 +173,26 @@ jobs:
           print("Cropped Sudoku images are the visual source of truth.")
           PY
 
+      - name: Refuse to publish unverified garbage
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          d = json.loads(Path("frontend/public/data/today.json").read_text())
+          good = [
+              p for p in d["puzzles"]
+              if p.get("verified")
+              and 17 <= sum(1 for row in p["grid"] for v in row if v) <= 40
+          ]
+          print(f"Usable puzzles: {len(good)}/{len(d['puzzles'])}")
+          if not good:
+              print("No verified puzzle with 17-40 clues; refusing to publish.")
+              print("Yesterday's data stays live instead of advert OCR noise.")
+              sys.exit(1)
+          PY
+
       - name: Commit daily Sudoku data and images
         shell: bash
         run: |

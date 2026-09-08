@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import math
 import shutil
+import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,11 @@ from typing import Optional
 import cv2
 import numpy as np
 import requests
+
+# Board ROIs + morphology grid check shared with the OCR pipeline. This is
+# the signal that actually proves a 9x9 board exists (dimensions alone
+# cannot: ad fragments ship at the same thumbnail size).
+from dc_sudoku_pipeline import BOARD_BOXES, detect_grid_lines
 
 
 BASE_URL = "http://103.241.136.50/epaper/DC/HYD/510X798"
@@ -53,6 +59,7 @@ class Candidate:
     heading1_score: float = 0.0
     heading2_score: float = 0.0
     layout_score: float = 0.0
+    grid_score: float = 0.0
     final_score: float = 0.0
 
 
@@ -267,6 +274,39 @@ def layout_similarity(
     )
 
 
+def grid_score(image: np.ndarray) -> float:
+    """0-100: do the expected board ROIs contain real 9x9 grid lines?
+
+    The candidate is resized to the reference frame first, so fragments at
+    any native resolution are judged on structure, not size. Each board ROI
+    that yields morphology-verified (not uniform-fallback) grid lines adds
+    50. Advertisements and article text have no periodic 9x9 lines here.
+    """
+    try:
+        normalized = cv2.resize(
+            image,
+            (REFERENCE_W, REFERENCE_H),
+            interpolation=cv2.INTER_AREA,
+        )
+        score = 0.0
+        for box in BOARD_BOXES.values():
+            x1, y1, x2, y2 = box
+            crop = normalized[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            _, _, method = detect_grid_lines(crop)
+            if method == "morphology":
+                score += 50.0
+        return min(100.0, score)
+    except Exception:
+        return 0.0
+
+
+# Minimum grid_score for a candidate to be selectable. Below this the image
+# provably contains no Sudoku board in the OCR crop zones.
+GRID_GATE_MIN = 50.0
+
+
 def score_candidate(
     candidate: Candidate,
     reference: np.ndarray,
@@ -298,12 +338,16 @@ def score_candidate(
         reference,
     )
 
-    # Dimensions are intentionally the strongest signal.
+    candidate.grid_score = grid_score(image)
+
+    # Dimensions pick the best-scaled true panel; the grid check proves a
+    # board exists. Dimensions alone must never elect an ad again.
     candidate.final_score = (
-        0.50 * candidate.dimension_score
-        + 0.18 * candidate.heading1_score
-        + 0.18 * candidate.heading2_score
-        + 0.14 * candidate.layout_score
+        0.30 * candidate.dimension_score
+        + 0.12 * candidate.heading1_score
+        + 0.12 * candidate.heading2_score
+        + 0.11 * candidate.layout_score
+        + 0.35 * candidate.grid_score
     )
 
     return asdict(candidate)
@@ -461,14 +505,34 @@ def main():
             f"dim={item['dimension_score']:.1f} "
             f"h1={item['heading1_score']:.1f} "
             f"h2={item['heading2_score']:.1f} "
-            f"layout={item['layout_score']:.1f}"
+            f"layout={item['layout_score']:.1f} "
+            f"grid={item['grid_score']:.1f}"
         )
 
     if not ranked_items:
         print("No images found.")
-        return
+        sys.exit(1)
 
-    best = ranked_items[0]
+    eligible = [
+        item for item in ranked_items
+        if item["grid_score"] >= GRID_GATE_MIN
+    ]
+
+    if not eligible:
+        print()
+        print("=" * 72)
+        print("REJECTED: no candidate shows a 9x9 grid in the board zones.")
+        print("Refusing to elect an advertisement as the Sudoku source.")
+        print("=" * 72)
+        sys.exit(1)
+
+    print()
+    print(
+        f"{len(eligible)}/{len(ranked_items)} candidates pass "
+        f"the grid gate (>= {GRID_GATE_MIN:.0f})."
+    )
+
+    best = eligible[0]
 
     best_path = Path(
         best["path"]
@@ -485,7 +549,7 @@ def main():
     )
 
     for rank, item in enumerate(
-        ranked_items[:10],
+        eligible[:10],
         start=1,
     ):
         src = Path(item["path"])
@@ -524,12 +588,15 @@ def main():
             "height": REFERENCE_H,
         },
         "weights": {
-            "dimensions": 0.50,
-            "heading1": 0.18,
-            "heading2": 0.18,
-            "layout": 0.14,
+            "dimensions": 0.30,
+            "heading1": 0.12,
+            "heading2": 0.12,
+            "layout": 0.11,
+            "grid": 0.35,
         },
+        "grid_gate_min": GRID_GATE_MIN,
         "downloaded": len(downloaded),
+        "eligible": len(eligible),
         "best": best,
         "top50": ranked_items[:50],
     }
@@ -579,6 +646,11 @@ def main():
     print(
         "Layout:",
         f"{best['layout_score']:.2f}",
+    )
+
+    print(
+        "Grid:",
+        f"{best['grid_score']:.2f}",
     )
 
     print()

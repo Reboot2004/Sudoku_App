@@ -17,7 +17,8 @@ except Exception:  # pytesseract missing -> OCR degrades to empty, pipeline stil
         pass
 
 # ---------------------------------------------------------------------------
-# Detection owns discovery of sudoku_source.jpg. OCR only consumes that image.
+# Detection owns discovery of sudoku_source.jpg (dimensions + headings +
+# layout + 9x9 grid gate). OCR only consumes that image.
 # BOARD_BOXES is kept as an ROI hint only; per-crop grid lines are detected
 # dynamically (the old fixed GRID_LINES were off by ~5px on X and varied by
 # date, leaking grid borders into cells -> Tesseract read lines as "1").
