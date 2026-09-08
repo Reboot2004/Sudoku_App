@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "name": "dc-sudoku-mobile",
-  "version": "0.6.0",
-  "build": "8b39d3a",
-  "builtAt": "2026-09-08T10:31:47.658Z",
-  "js": "assets/app-B3GtpScB.js",
+  "version": "0.6.1",
+  "build": "b20b164",
+  "builtAt": "2026-09-08T11:11:31.292Z",
+  "js": "assets/app-FCkldpAS.js",
   "css": "assets/app-CNPwTRt0.css"
 }
