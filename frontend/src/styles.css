@@ -36,7 +36,7 @@ button:active{transform:scale(.97)}
 .dc-bar{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11px;color:var(--muted)}
 .dc-bar span{flex:1}.dc-bar button{min-height:32px;border:1px solid #c8d5dc;border-radius:8px;background:#fff;font-size:11px;font-weight:800;padding:3px 8px}
 .stats{display:flex;justify-content:space-between;font-size:11px;font-weight:800;color:var(--muted);padding:2px 4px 5px}
-.solved-banner{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;background:#eef8f1;border:1px solid #9ac7ad;border-radius:11px;padding:8px 10px;margin-bottom:6px;font-size:12px;color:#236645;box-shadow:var(--shadow)}
+.solved-banner{display:flex;align-items:center;gap:8px;background:#eef8f1;border:1px solid #9ac7ad;border-radius:11px;padding:8px 10px;margin-bottom:6px;font-size:12px;color:#236645;box-shadow:var(--shadow);flex:0 0 auto}
 .solved-banner strong{flex:1}.solved-banner button{min-height:36px;border:1px solid var(--navy);border-radius:10px;background:var(--navy);color:#fff;font-weight:800;padding:4px 12px;white-space:nowrap;box-shadow:0 2px 6px rgba(20,58,82,.18)}
 .cancel{width:100%;min-height:38px;margin-top:4px;border:1px solid #c8d5dc;border-radius:9px;background:#fff;font-weight:800}
 .top-btns{display:flex;gap:6px;align-items:center}
