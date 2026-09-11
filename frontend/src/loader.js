@@ -106,9 +106,9 @@ function badge(version, channel, onAction) {
     el = document.createElement('div');
     el.id = 'ota-badge';
     el.style.cssText =
-      'position:fixed;right:8px;bottom:8px;z-index:9999;display:flex;gap:6px;align-items:center;' +
+      'position:fixed;right:8px;bottom:calc(68px + env(safe-area-inset-bottom, 0px));z-index:9999;display:flex;gap:6px;align-items:center;' +
       'font-family:system-ui,sans-serif;font-size:11px;font-weight:700;color:#fff;' +
-      'background:rgba(20,58,82,.82);border-radius:999px;padding:5px 6px 5px 10px;backdrop-filter:blur(4px);';
+      'background:rgba(20,58,82,.88);border-radius:999px;padding:5px 6px 5px 10px;backdrop-filter:blur(6px);box-shadow:0 4px 12px rgba(0,0,0,.18);';
     document.body.appendChild(el);
   }
   el.innerHTML = '';
@@ -130,7 +130,7 @@ function toast(msg) {
   t.id = 'ota-toast';
   t.textContent = msg;
   t.style.cssText =
-    'position:fixed;left:50%;bottom:44px;transform:translateX(-50%);z-index:10001;' +
+    'position:fixed;left:50%;bottom:calc(80px + env(safe-area-inset-bottom, 0px));transform:translateX(-50%);z-index:10001;' +
     'background:#143a52;color:#fff;font-family:system-ui,sans-serif;font-size:13px;font-weight:700;' +
     'border-radius:999px;padding:9px 16px;box-shadow:0 8px 24px rgba(0,0,0,.25);';
   document.body.appendChild(t);
@@ -143,7 +143,7 @@ function updatesMenu(current, actions) {
   const m = document.createElement('div');
   m.id = 'ota-menu';
   m.style.cssText =
-    'position:fixed;right:8px;bottom:44px;z-index:10000;background:#fff;color:#14232d;border:1px solid #c9d6dd;' +
+    'position:fixed;right:8px;bottom:calc(104px + env(safe-area-inset-bottom, 0px));z-index:10000;background:#fff;color:#14232d;border:1px solid #c9d6dd;' +
     'border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.2);padding:8px;min-width:210px;max-width:280px;max-height:60vh;overflow:auto;' +
     'font-family:system-ui,sans-serif;font-size:13px;';
   const pin = current.pin || 'auto';
