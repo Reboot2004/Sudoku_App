@@ -253,10 +253,14 @@ def ocr_cell(cell_gray: np.ndarray) -> tuple[int, float, list[str], float, str]:
                           interpolation=cv2.INTER_CUBIC)
     _, otsu = cv2.threshold(gray_big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     otsu = cv2.copyMakeBorder(otsu, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
+    # third variant: lightly blurred then Otsu (helps 5 vs 2 where top bar is faint)
+    blur_big = cv2.GaussianBlur(gray_big, (3, 3), 0)
+    _, otsu_blur = cv2.threshold(blur_big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_blur = cv2.copyMakeBorder(otsu_blur, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
     votes: list[str] = []
     confs: list[float] = []
     try:
-        for image, psms in ((ocr_img, (10, 8)), (otsu, (10,))):
+        for image, psms in ((ocr_img, (10, 8, 6)), (otsu, (10, 8)), (otsu_blur, (10,))):
             for psm in psms:
                 try:
                     data = pytesseract.image_to_data(
