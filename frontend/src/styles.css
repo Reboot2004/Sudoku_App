@@ -62,3 +62,4 @@ button:active{transform:scale(.97)}
 .help-list dd{margin:2px 0 0;color:#33454f}
 .help-p{font-size:13px;line-height:1.5;color:#33454f;margin:0}
 .help-close{position:sticky;top:0;float:right;border:1px solid #c8d5dc;border-radius:9px;background:#fff;font-weight:800;font-size:12px;padding:7px 12px}
+.cell-undo{position:absolute;width:32px;height:32px;border-radius:50%;background:var(--navy);color:#fff;border:2px solid #fff;font-size:16px;font-weight:900;line-height:1;display:grid;place-items:center;z-index:30;box-shadow:0 2px 8px rgba(0,0,0,.32);padding:0;animation:pop .22s ease}
