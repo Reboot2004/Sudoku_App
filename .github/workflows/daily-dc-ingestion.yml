@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 env:
   TZ: Asia/Kolkata
@@ -99,12 +100,14 @@ jobs:
           print(f"Downloaded candidates: {d['downloaded']}")
           PY
 
-      - name: Crop Sudoku images and run OCR (dynamic grid lines)
+      - name: Crop Sudoku images and run OCR (dynamic grid lines + vote + guided repair)
         shell: bash
         run: |
           python ingestion/dc_sudoku_pipeline.py \
             --date "${{ steps.date.outputs.date }}" \
-            --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg"
+            --source "dc_test/${{ steps.date.outputs.date }}/sudoku/sudoku_source.jpg" \
+            --detection-json "dc_test/${{ steps.date.outputs.date }}/detection.json" \
+            --vote-top 3
 
       - name: Copy cropped Sudoku images into frontend data
         shell: bash
@@ -192,6 +195,56 @@ jobs:
               print("Yesterday's data stays live instead of advert OCR noise.")
               sys.exit(1)
           PY
+
+      - name: Open issue on ingestion failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DATE: ${{ steps.date.outputs.date }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY' > /tmp/dc-issue.md
+          import json
+          import os
+          from pathlib import Path
+          date = os.environ.get("DATE") or "unknown-date"
+          lines = [f"Daily DC ingestion failed for {date}.", ""]
+          try:
+              d = json.loads(Path(f"dc_test/{date}/detection.json").read_text())
+              b = d.get("best", {})
+              lines.append(
+                  f"Detection: best=tabp{b.get('page')}_{b.get('variant')} "
+                  f"final={b.get('final_score', 0):.1f} grid={b.get('grid_score', 0):.1f} "
+                  f"eligible={d.get('eligible')} downloaded={d.get('downloaded')}"
+              )
+              for it in d.get("top50", [])[:5]:
+                  lines.append(
+                      f"  tabp{it.get('page')}_{it.get('variant')} "
+                      f"final={it.get('final_score', 0):.1f} grid={it.get('grid_score', 0):.1f}"
+                  )
+          except Exception as e:
+              lines.append(f"detection.json unreadable: {e}")
+          lines.append("")
+          try:
+              o = json.loads(Path(f"dc_test/{date}/sudoku/ocr_result.json").read_text())
+              for p in o["puzzles"]:
+                  clues = sum(1 for row in p["grid"] for v in row if v)
+                  lines.append(
+                      f"{p['id']}: verified={p['verified']} clues={clues} "
+                      f"repair={p['ocr'].get('repair') or 'none'} "
+                      f"guided={p['ocr'].get('guided_repair') or 'none'} "
+                      f"validation={p['validation']}"
+                  )
+          except Exception as e:
+              lines.append(f"ocr_result.json unreadable: {e}")
+          lines.append("")
+          lines.append(f"Run: {os.environ.get('RUN_URL', '')}")
+          lines.append("Full candidates: Actions artifact dc-sudoku-<date>.")
+          print("\n".join(lines))
+          PY
+          cat /tmp/dc-issue.md
+          gh issue create --title "DC ingestion failed for $DATE" --body-file /tmp/dc-issue.md || true
 
       - name: Commit daily Sudoku data and images
         shell: bash

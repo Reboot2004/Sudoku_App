@@ -18,7 +18,9 @@ except Exception:  # pytesseract missing -> OCR degrades to empty, pipeline stil
 
 # ---------------------------------------------------------------------------
 # Detection owns discovery of sudoku_source.jpg (dimensions + headings +
-# layout + 9x9 grid gate). OCR only consumes that image.
+# layout + 9x9 grid gate). OCR consumes that image, plus --detection-json
+# --vote-top N for multi-source majority vote; solver-guided repair then
+# fixes single-cell OCR mistakes (never invents givens).
 # BOARD_BOXES is kept as an ROI hint only; per-crop grid lines are detected
 # dynamically (the old fixed GRID_LINES were off by ~5px on X and varied by
 # date, leaking grid borders into cells -> Tesseract read lines as "1").
@@ -228,12 +230,12 @@ def ocr_cell(cell_gray: np.ndarray) -> tuple[int, float, list[str], float, str]:
     """Returns (digit, conf01, votes, ink_frac, decision). digit=0 means empty."""
     binary, ink = clean_cell(cell_gray)
     if ink < EMPTY_INK_FRAC:
-        return 0, 0.0, [], ink, "empty-ink"
+        return 0, 0.0, [], ink, "empty-ink", []
     area_frac, bbox = largest_digit_blob(binary)
     if bbox is None:
-        return 0, 0.0, [], ink, "empty-nocontour"
+        return 0, 0.0, [], ink, "empty-nocontour", []
     if pytesseract is None:
-        return 0, 0.0, [], ink, "no-tesseract"
+        return 0, 0.0, [], ink, "no-tesseract", []
     # isolate the digit blob, pad square, upscale for Tesseract
     x, y, bw, bh = bbox
     pad = 3
@@ -269,7 +271,7 @@ def ocr_cell(cell_gray: np.ndarray) -> tuple[int, float, list[str], float, str]:
                         output_type=pytesseract.Output.DICT,
                     )
                 except TesseractNotFoundError:
-                    return 0, 0.0, [], ink, "no-tesseract-binary"
+                    return 0, 0.0, [], ink, "no-tesseract-binary", []
                 except Exception:
                     continue
                 for text, conf in zip(data.get("text", []), data.get("conf", [])):
@@ -284,12 +286,18 @@ def ocr_cell(cell_gray: np.ndarray) -> tuple[int, float, list[str], float, str]:
     except Exception:
         pass
     if not votes:
-        return 0, 0.0, [], ink, "empty-lowconf"
+        return 0, 0.0, [], ink, "empty-lowconf", []
     counts: dict[str, int] = {}
     for v in votes:
         counts[v] = counts.get(v, 0) + 1
     best = max(counts, key=lambda k: (counts[k], np.mean([c for v, c in zip(votes, confs) if v == k])))
     best_confs = [c for v, c in zip(votes, confs) if v == best]
+    # full hypothesis ranking for solver-guided repair (top-3 digit hypotheses)
+    agg: dict[str, list[float]] = {}
+    for v, cf in zip(votes, confs):
+        agg.setdefault(v, []).append(cf)
+    ranked = sorted(agg.items(), key=lambda kv: (len(kv[1]), float(np.mean(kv[1]))), reverse=True)
+    alts = [{"digit": int(k), "conf": round(float(np.mean(v)), 4), "votes": len(v)} for k, v in ranked[:3]]
     # require agreement: >=2 votes, a single vote at/above SINGLE_CONF, or a
     # single vote backed by a strong digit-sized blob (area>=5% of the cell).
     # Cells reaching this point already passed ink + blob gates (CI empties
@@ -297,9 +305,9 @@ def ocr_cell(cell_gray: np.ndarray) -> tuple[int, float, list[str], float, str]:
     # yield exactly one Tesseract vote.
     n_best = len([v for v in votes if v == best])
     if n_best < 2 and max(best_confs) < SINGLE_CONF and area_frac < 0.05:
-        return 0, 0.0, votes, ink, "empty-noagreement"
+        return 0, 0.0, votes, ink, "empty-noagreement", alts
     conf01 = round(float(np.mean(best_confs)) / 100.0, 4)
-    return int(best), conf01, votes, ink, "ocr"
+    return int(best), conf01, votes, ink, "ocr", alts
 
 
 def ocr_grid(crop_bgr: np.ndarray) -> tuple[list[list[int]], dict[str, Any], np.ndarray, np.ndarray]:
@@ -315,13 +323,13 @@ def ocr_grid(crop_bgr: np.ndarray) -> tuple[list[list[int]], dict[str, Any], np.
     for r in range(9):
         for c in range(9):
             cell = extract_cell(gray, xs, ys, r, c)
-            digit, cf, votes, ink, decision = ocr_cell(cell)
+            digit, cf, votes, ink, decision, alts = ocr_cell(cell)
             grid[r][c] = digit
             conf[r][c] = cf
             if digit:
                 occupied += 1
             cells_meta.append({"row": r + 1, "column": c + 1, "digit": digit,
-                               "confidence": cf, "votes": votes,
+                               "confidence": cf, "votes": votes, "alts": alts,
                                "ink_frac": round(float(ink), 4), "decision": decision})
             small = cv2.resize(cell, (48, 48), interpolation=cv2.INTER_AREA)
             thumbs.append(small)
@@ -451,10 +459,191 @@ def repair_grid(grid: list[list[int]], conf: list[list[float]]) -> tuple[list[li
     return grid, notes
 
 
+# ---------------------------------------------------------------------------
+# Solver-guided repair + multi-source voting
+# ---------------------------------------------------------------------------
+# Classic newsprint confusions observed in CI (faint top bars, thin strokes).
+CONFUSE = {
+    "1": ["7"], "7": ["1"],
+    "2": ["5"], "5": ["2"],
+    "3": ["8"], "8": ["6", "9"], "6": ["8"], "9": ["4", "8"], "4": ["9"],
+}
+
+
+def vote_grids(grids_confs: list[tuple[list[list[int]], list[list[float]]]]
+               ) -> tuple[list[list[int]], list[list[float]], float]:
+    """Per-cell majority vote across source reads. Ties break by confidence,
+    then towards non-empty (OCR misses more often than it hallucinates,
+    given the empty-ink gating). Returns (grid, conf, agreement_frac)."""
+    voted = [[0] * 9 for _ in range(9)]
+    vconf = [[0.0] * 9 for _ in range(9)]
+    agree = 0
+    for r in range(9):
+        for c in range(9):
+            tally: dict[int, list] = {}
+            for g, cf in grids_confs:
+                d = g[r][c]
+                slot = tally.setdefault(d, [0, 0.0])
+                slot[0] += 1
+                slot[1] = max(slot[1], cf[r][c])
+            best_d, (n, cf) = max(tally.items(),
+                                  key=lambda kv: (kv[1][0], kv[1][1], kv[0] != 0))
+            voted[r][c], vconf[r][c] = best_d, cf
+            if n == len(grids_confs):
+                agree += 1
+    return voted, vconf, round(agree / 81.0, 4)
+
+
+def merge_alts(cells_lists: list[list[dict]]) -> list[dict]:
+    """Union per-cell OCR hypotheses across sources (max conf per digit)."""
+    merged: dict[tuple[int, int], dict] = {}
+    order: list[tuple[int, int]] = []
+    for cells in cells_lists:
+        for m in cells:
+            key = (m["row"], m["column"])
+            slot = merged.get(key)
+            if slot is None:
+                slot = dict(m)
+                slot["alts"] = [dict(a) for a in (m.get("alts") or [])]
+                merged[key] = slot
+                order.append(key)
+                continue
+            seen = {a["digit"]: a for a in slot["alts"]}
+            for a in (m.get("alts") or []):
+                if a["digit"] in seen:
+                    if a["conf"] > seen[a["digit"]]["conf"]:
+                        seen[a["digit"]]["conf"] = a["conf"]
+                        seen[a["digit"]]["votes"] = max(seen[a["digit"]].get("votes", 0), a.get("votes", 0))
+                else:
+                    seen[a["digit"]] = dict(a)
+            slot["alts"] = sorted(seen.values(), key=lambda a: (-a["conf"], -a.get("votes", 0)))[:3]
+            slot["ink_frac"] = max(slot.get("ink_frac", 0), m.get("ink_frac", 0))
+    return [merged[k] for k in order]
+
+
+def _grid_key(grid: list[list[int]]) -> tuple:
+    """Higher is better: conflict-free, solvable, unique, 17-40 clues."""
+    bad = find_conflicts(grid)
+    clues = sum(1 for row in grid for v in row if v)
+    if bad:
+        return (0, -len(bad), 0, 0)
+    cnt = solution_count(grid)
+    return (1, 1 if cnt > 0 else 0, 1 if cnt == 1 else 0,
+            1 if 17 <= clues <= 40 else 0)
+
+
+def guided_repair(grid: list[list[int]], conf: list[list[float]],
+                  cells_meta: list[dict], max_rounds: int = 6
+                  ) -> tuple[list[list[int]], list[str], bool]:
+    """Minimal single-cell fixes from OCR hypotheses + confusion pairs.
+
+    Only cells with real ink are touched, and only with digits OCR actually
+    hypothesised (or classic confusions of the read digit). Accepts the
+    change only if the grid gets strictly closer to valid+unique+17-40.
+    Returns (grid, notes, ok); on failure the input grid is returned
+    unchanged so the publish gate, not a guess, decides.
+    """
+    work = [row[:] for row in grid]
+    notes: list[str] = []
+    by_rc = {(m["row"] - 1, m["column"] - 1): m for m in cells_meta}
+
+    def cands_for(r: int, c: int, cur: int) -> list[tuple[int, float]]:
+        m = by_rc.get((r, c), {})
+        out: list[tuple[int, float]] = []
+        for a in (m.get("alts") or []):
+            d = int(a["digit"])
+            if d != cur and all(d != x[0] for x in out):
+                try:
+                    w = float(a.get("conf", 0) or 0)
+                except (ValueError, TypeError):
+                    w = 0.0
+                out.append((d, w))
+        if cur:
+            for s in CONFUSE.get(str(cur), []):
+                d = int(s)
+                if d != cur and all(d != x[0] for x in out):
+                    out.append((d, 0.0))
+        return out
+
+    for _ in range(max_rounds):
+        cur_key = _grid_key(work)
+        if cur_key == (1, 1, 1, 1):
+            break
+        best = (cur_key, -1.0)
+        best_edit = None
+        for r in range(9):
+            for c in range(9):
+                cur = work[r][c]
+                m = by_rc.get((r, c), {})
+                try:
+                    ink = float(m.get("ink_frac", 0) or 0)
+                except (ValueError, TypeError):
+                    ink = 0.0
+                if cur == 0 and ink < EMPTY_INK_FRAC:
+                    continue
+                for d, w in cands_for(r, c, cur):
+                    work[r][c] = d
+                    k = _grid_key(work)
+                    work[r][c] = cur
+                    if (k, w) > best:
+                        best, best_edit = (k, w), (r, c, cur, d)
+        if not best_edit:
+            break
+        r, c, cur, d = best_edit
+        work[r][c] = d
+        notes.append(f"guided R{r + 1}C{c + 1} {cur or 'empty'}->{d}")
+    ok = _grid_key(work) == (1, 1, 1, 1)
+    if not ok:
+        return grid, notes + ["guided: no unique solution reached; kept input"], False
+    return work, notes, True
+
+
+def load_vote_sources(det_path, top_n: int, primary):
+    """Top-N grid-gated source images from detection.json (primary first).
+    Falls back to [primary] when the manifest is missing/unreadable."""
+    primary = Path(primary)
+    if not det_path or (top_n or 1) <= 1:
+        return [primary]
+    try:
+        d = json.loads(Path(det_path).read_text())
+    except Exception as e:
+        print(f"vote: cannot read {det_path} ({e}); single-source OCR")
+        return [primary]
+    items = [x for x in d.get("top50", []) if (x.get("grid_score", 0) or 0) >= 50]
+    items.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+
+    def key_of(p):
+        try:
+            return Path(p).as_posix()
+        except Exception:
+            return str(p)
+
+    out, seen = [], set()
+    for it in items:
+        p = str(it.get("path", ""))
+        k = key_of(p)
+        if p and k not in seen:
+            seen.add(k)
+            out.append(Path(p))
+        if len(out) >= max(1, top_n):
+            break
+    if key_of(primary) not in seen:
+        out = [primary] + out[:max(0, (top_n or 1) - 1)]
+    ok = [p for p in out if p.exists()]
+    if not ok:
+        print("vote: no source files exist; single-source fallback to primary")
+        return [primary]
+    return ok
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DC Sudoku OCR: dynamic grid lines + empty gating + repair.")
+    parser = argparse.ArgumentParser(description="DC Sudoku OCR: dynamic grid lines + empty gating + vote + guided repair.")
     parser.add_argument("--date", required=True)
     parser.add_argument("--source", required=True)
+    parser.add_argument("--detection-json", required=False, default=None,
+                        help="detection.json manifest; enables multi-source majority vote")
+    parser.add_argument("--vote-top", type=int, default=1,
+                        help="OCR the top-N grid-gated sources and majority-vote per cell (1 = single source)")
     args = parser.parse_args()
 
     root = Path("dc_test") / args.date / "sudoku"
@@ -464,7 +653,10 @@ def main() -> None:
 
     print(f"Source dimensions: {source_w}x{source_h}")
     print("Detection stage: UNCHANGED (sudoku_source.jpg from dc_sudoku_detect.py)")
-    print("OCR: dynamic per-crop grid lines + adaptive empty gating + Tesseract + repair")
+    print("OCR: dynamic per-crop grid lines + adaptive empty gating + Tesseract + vote + guided repair")
+
+    vote_srcs = load_vote_sources(args.detection_json, args.vote_top, Path(args.source))
+    print(f"Vote sources ({len(vote_srcs)}): {[str(p) for p in vote_srcs]}")
 
     puzzles = []
     for puzzle_id, box in BOARD_BOXES.items():
@@ -474,10 +666,41 @@ def main() -> None:
         montage_path = root / f"{puzzle_id}-cells.jpg"
         cv2.imwrite(str(image_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
-        grid, ocr_meta, debug, montage = ocr_grid(crop)
-        conf = ocr_meta["confidence"]
+        runs = []  # (label, grid, meta, debug, montage)
+        for src_path in vote_srcs:
+            try:
+                if Path(src_path) == Path(args.source):
+                    src_crop = crop
+                else:
+                    simg = load_image(Path(src_path))
+                    sh, sw = simg.shape[:2]
+                    src_crop = crop_region(simg, scaled_box(box, sw, sh))
+                g, meta, dbg, mon = ocr_grid(src_crop)
+                runs.append((str(src_path), g, meta, dbg, mon))
+            except Exception as e:
+                print(f"{puzzle_id} vote source {src_path} skipped ({e})")
+        if not runs:
+            raise RuntimeError(f"No readable source for {puzzle_id}")
+        prim_meta = runs[0][2]
+        if len(runs) > 1:
+            grid, conf, agree = vote_grids([(g, m["confidence"]) for _, g, m, _, _ in runs])
+            cells_meta = merge_alts([m["cells"] for _, _, m, _, _ in runs])
+            vote_info = {"sources": [s for s, _, _, _, _ in runs], "agreement": agree}
+        else:
+            grid, conf = runs[0][1], runs[0][2]["confidence"]
+            cells_meta = runs[0][2]["cells"]
+            vote_info = {"sources": [runs[0][0]], "agreement": 1.0}
+        ocr_meta = {"engine": "Tesseract per-cell OCR (dynamic lines + empty gating + vote + guided repair)",
+                    "line_method": prim_meta["line_method"],
+                    "x_lines": prim_meta["x_lines"], "y_lines": prim_meta["y_lines"],
+                    "occupied_cells": sum(1 for row in grid for v in row if v),
+                    "confidence": conf, "cells": cells_meta, "vote": vote_info}
+        debug, montage = runs[0][3], runs[0][4]
         grid, repair_notes = repair_grid(grid, conf)
         ocr_meta["repair"] = repair_notes
+        grid, guided_notes, guided_ok = guided_repair(grid, conf, cells_meta)
+        ocr_meta["guided_repair"] = guided_notes
+        ocr_meta["guided_ok"] = guided_ok
         checks = validate(grid)
         cv2.imwrite(str(debug_path), debug, [cv2.IMWRITE_JPEG_QUALITY, 92])
         cv2.imwrite(str(montage_path), montage, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -485,8 +708,8 @@ def main() -> None:
         clues = sum(1 for row in grid for v in row if v)
         print(f"{puzzle_id} lines({ocr_meta['line_method']}): x={ocr_meta['x_lines']}")
         print(f"{puzzle_id} grid: {grid}")
-        print(f"{puzzle_id} clues={clues} occupied_raw={ocr_meta['occupied_cells']} "
-              f"repair={repair_notes or 'none'} validation={checks}")
+        print(f"{puzzle_id} clues={clues} vote_srcs={len(ocr_meta['vote']['sources'])} agree={ocr_meta['vote']['agreement']} "
+              f"repair={repair_notes or 'none'} guided={guided_notes or 'none'} guided_ok={guided_ok} validation={checks}")
 
         puzzles.append({
             "id": puzzle_id,
