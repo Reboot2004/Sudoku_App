@@ -6,7 +6,7 @@ The daily GitHub workflow runs Monday-Saturday at 08:00 IST and skips Sundays.
 
 ## Ingestion hardening (post 2026-09-08 ad incident)
 - Detection gates candidates on a real 9x9 grid in the board zones (`grid_score`, morphology check); an ad can no longer win on thumbnail dimensions. No eligible candidate -> the job fails loudly instead of electing garbage.
-- OCR runs the top-3 grid-gated sources and majority-votes per cell (`--vote-top 3`), then solver-guided repair tries minimal single-cell fixes from OCR hypotheses + classic confusions (`5<->2`, `1<->7`…) to reach a valid unique 17-40-clue grid. It only touches inked cells and reverts on failure.
+- OCR runs the top-3 grid-gated sources and majority-votes per cell (`--vote-top 3`), then solver-guided repair tries evidence-gated restorations: hypothesis conf >= 0.5, never overriding a confident read (a competing hypothesis can complete to a *different* unique solution, so uniqueness alone is not acceptance). Strict improvement only, revert otherwise.
 - The publish gate refuses to commit unless at least one puzzle is verified; on any failure the workflow auto-opens a GitHub issue with detection scores + OCR diagnostics.
 
 ## OTA frontend updates (no reinstall)

@@ -462,13 +462,15 @@ def repair_grid(grid: list[list[int]], conf: list[list[float]]) -> tuple[list[li
 # ---------------------------------------------------------------------------
 # Solver-guided repair + multi-source voting
 # ---------------------------------------------------------------------------
-# Classic newsprint confusions observed in CI (faint top bars, thin strokes,
-# clipped bottoms in the last band: 8->2 and 3->2 seen 2026-10-03).
-CONFUSE = {
-    "1": ["7"], "7": ["1"],
-    "2": ["5", "8", "3"], "5": ["2"], "3": ["8"],
-    "8": ["6", "9"], "6": ["8"], "9": ["4", "8"], "4": ["9"],
-}
+# Evidence-gated restorations only: a fix is applied iff the replacement
+# digit was hypothesised by OCR with conf >= GUIDED_MIN_CONF AND the cell
+# is empty or its current read is weak (conf < GUIDED_MIN_CONF). This
+# asymmetry is deliberate: overriding a confident read with a competing
+# hypothesis can complete to a *different* unique solution (proven live:
+# R2C1 5->2 on an ambiguous grid yields count==1 with wrong givens), which
+# would publish a wrong puzzle as verified. When in doubt we revert and
+# let the publish gate + manual transcription decide.
+GUIDED_MIN_CONF = 0.5
 
 
 def vote_grids(grids_confs: list[tuple[list[list[int]], list[list[float]]]]
@@ -536,11 +538,11 @@ def _grid_key(grid: list[list[int]]) -> tuple:
 def guided_repair(grid: list[list[int]], conf: list[list[float]],
                   cells_meta: list[dict], max_rounds: int = 6
                   ) -> tuple[list[list[int]], list[str], bool]:
-    """Minimal single-cell fixes from OCR hypotheses + confusion pairs.
+    """Minimal single-cell fixes from strong OCR hypotheses only.
 
-    Only cells with real ink are touched, and only with digits OCR actually
-    hypothesised (or classic confusions of the read digit). Accepts the
-    change only if the grid gets strictly closer to valid+unique+17-40.
+    Only cells with real ink are touched, only with digits hypothesised at
+    conf >= GUIDED_MIN_CONF, and never overriding a confident read. Accepts
+    a change only on strict improvement toward valid+unique+17-40.
     Returns (grid, notes, ok); on failure the input grid is returned
     unchanged so the publish gate, not a guess, decides.
     """
@@ -550,28 +552,38 @@ def guided_repair(grid: list[list[int]], conf: list[list[float]],
 
     def cands_for(r: int, c: int, cur: int) -> list[tuple[int, float]]:
         m = by_rc.get((r, c), {})
+        try:
+            cur_conf = float(m.get("confidence", 0) or 0)
+        except (ValueError, TypeError):
+            cur_conf = 0.0
+        if cur != 0 and cur_conf >= GUIDED_MIN_CONF:
+            return []  # never override a confident read (false-fix hazard)
         out: list[tuple[int, float]] = []
         for a in (m.get("alts") or []):
-            d = int(a["digit"])
-            if d != cur and all(d != x[0] for x in out):
-                try:
-                    w = float(a.get("conf", 0) or 0)
-                except (ValueError, TypeError):
-                    w = 0.0
-                out.append((d, w))
-        if cur:
-            for s in CONFUSE.get(str(cur), []):
-                d = int(s)
-                if d != cur and all(d != x[0] for x in out):
-                    out.append((d, 0.0))
+            try:
+                d = int(a["digit"])
+            except (ValueError, TypeError):
+                continue
+            if d == cur or any(d == x[0] for x in out):
+                continue
+            try:
+                w = float(a.get("conf", 0) or 0)
+            except (ValueError, TypeError):
+                w = 0.0
+            if w < GUIDED_MIN_CONF:
+                continue
+            out.append((d, w))
         return out
 
     for _ in range(max_rounds):
         cur_key = _grid_key(work)
         if cur_key == (1, 1, 1, 1):
             break
-        best = (cur_key, -1.0)
-        best_edit = None
+        # STRICT improvement only: a flip that leaves the key unchanged must
+        # never be accepted, otherwise two hypotheses ping-pong forever
+        # (seen live: R8C1 6->7->6...). Confidence only tiebreaks between
+        # two strictly-improving edits.
+        best_key, best_w, best_edit = cur_key, float("-inf"), None
         for r in range(9):
             for c in range(9):
                 cur = work[r][c]
@@ -586,8 +598,8 @@ def guided_repair(grid: list[list[int]], conf: list[list[float]],
                     work[r][c] = d
                     k = _grid_key(work)
                     work[r][c] = cur
-                    if (k, w) > best:
-                        best, best_edit = (k, w), (r, c, cur, d)
+                    if k > cur_key and (k, w) > (best_key, best_w):
+                        best_key, best_w, best_edit = k, w, (r, c, cur, d)
         if not best_edit:
             break
         r, c, cur, d = best_edit
@@ -599,8 +611,24 @@ def guided_repair(grid: list[list[int]], conf: list[list[float]],
     return work, notes, True
 
 
+def _file_md5(path: Path):
+    try:
+        import hashlib
+        h = hashlib.new("md5")
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
 def load_vote_sources(det_path, top_n: int, primary):
     """Top-N grid-gated source images from detection.json (primary first).
+    Only same-panel fragments vote: aspect within 8% and size within
+    0.5x-2x of the primary (a different article at the same relative crop
+    would otherwise poison the majority). Identical files are deduped by
+    content hash (sudoku_source.jpg is a copy of the winning thumbnail).
     Falls back to [primary] when the manifest is missing/unreadable."""
     primary = Path(primary)
     if not det_path or (top_n or 1) <= 1:
@@ -610,8 +638,24 @@ def load_vote_sources(det_path, top_n: int, primary):
     except Exception as e:
         print(f"vote: cannot read {det_path} ({e}); single-source OCR")
         return [primary]
+    try:
+        pimg = cv2.imread(str(primary), cv2.IMREAD_GRAYSCALE)
+        ph, pw = pimg.shape
+        pasp = pw / max(1, ph)
+    except Exception:
+        pw, ph, pasp = 0, 0, 0.0
     items = [x for x in d.get("top50", []) if (x.get("grid_score", 0) or 0) >= 50]
-    items.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+    gated = []
+    for x in items:
+        w, h = x.get("width", 0) or 0, x.get("height", 0) or 0
+        if pw and w and h:
+            asp = w / max(1, h)
+            if abs(asp - pasp) / max(1e-9, pasp) > 0.08:
+                continue
+            if not (0.5 * pw <= w <= 2.0 * pw and 0.5 * ph <= h <= 2.0 * ph):
+                continue
+        gated.append(x)
+    gated.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
     def key_of(p):
         try:
@@ -619,16 +663,22 @@ def load_vote_sources(det_path, top_n: int, primary):
         except Exception:
             return str(p)
 
-    out, seen = [], set()
-    for it in items:
+    out, seen_key, seen_hash = [], set(), set()
+    for it in gated:
         p = str(it.get("path", ""))
         k = key_of(p)
-        if p and k not in seen:
-            seen.add(k)
-            out.append(Path(p))
+        if not p or k in seen_key:
+            continue
+        h = _file_md5(p)
+        if h and h in seen_hash:
+            continue
+        seen_key.add(k)
+        if h:
+            seen_hash.add(h)
+        out.append(Path(p))
         if len(out) >= max(1, top_n):
             break
-    if key_of(primary) not in seen:
+    if key_of(primary) not in seen_key:
         out = [primary] + out[:max(0, (top_n or 1) - 1)]
     ok = [p for p in out if p.exists()]
     if not ok:
