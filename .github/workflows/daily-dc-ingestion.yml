@@ -129,8 +129,11 @@ jobs:
           d = json.loads((Path("dc_test") / date / "sudoku" / "ocr_result.json").read_text())
           for p in d["puzzles"]:
               clues = sum(1 for row in p["grid"] for v in row if v)
+              vote = p["ocr"].get("vote") or {}
               print(f"--- {p['id']} verified={p['verified']} clues={clues} "
-                    f"lines={p['ocr']['line_method']} repair={p['ocr'].get('repair') or 'none'}")
+                    f"lines={p['ocr']['line_method']} repair={p['ocr'].get('repair') or 'none'} "
+                    f"vote_srcs={len(vote.get('sources', []))} agree={vote.get('agreement')} "
+                    f"guided_ok={p['ocr'].get('guided_ok')} guided={p['ocr'].get('guided_repair') or 'none'}")
               for row in p["grid"]:
                   print(" ".join(str(v) for v in row))
               print(f"validation={p['validation']}")

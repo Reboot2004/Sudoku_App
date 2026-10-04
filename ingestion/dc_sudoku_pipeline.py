@@ -462,11 +462,12 @@ def repair_grid(grid: list[list[int]], conf: list[list[float]]) -> tuple[list[li
 # ---------------------------------------------------------------------------
 # Solver-guided repair + multi-source voting
 # ---------------------------------------------------------------------------
-# Classic newsprint confusions observed in CI (faint top bars, thin strokes).
+# Classic newsprint confusions observed in CI (faint top bars, thin strokes,
+# clipped bottoms in the last band: 8->2 and 3->2 seen 2026-10-03).
 CONFUSE = {
     "1": ["7"], "7": ["1"],
-    "2": ["5"], "5": ["2"],
-    "3": ["8"], "8": ["6", "9"], "6": ["8"], "9": ["4", "8"], "4": ["9"],
+    "2": ["5", "8", "3"], "5": ["2"], "3": ["8"],
+    "8": ["6", "9"], "6": ["8"], "9": ["4", "8"], "4": ["9"],
 }
 
 
