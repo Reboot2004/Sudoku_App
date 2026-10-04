@@ -273,14 +273,16 @@ jobs:
           done
 
       - name: Upload complete ingestion artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: dc-sudoku-${{ steps.date.outputs.date }}
           path: dc_test/${{ steps.date.outputs.date }}/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload canonical daily JSON
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: dc-sudoku-json-${{ steps.date.outputs.date }}
