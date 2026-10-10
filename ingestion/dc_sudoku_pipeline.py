@@ -24,12 +24,17 @@ except Exception:  # pytesseract missing -> OCR degrades to empty, pipeline stil
 # BOARD_BOXES is kept as an ROI hint only; per-crop grid lines are detected
 # dynamically (the old fixed GRID_LINES were off by ~5px on X and varied by
 # date, leaking grid borders into cells -> Tesseract read lines as "1").
+# Each box carries a ~14px buffer on all sides (CI 2026-10-10): tight boxes
+# chopped the top border + row-1 digit tops (detected y_lines[0] == 0 with a
+# squeezed 20px first row vs 30px rows), starving row-1 OCR and causing
+# 5->3 style misreads. With the buffer the true outer border is detected
+# with ~5px breathing room and all 9 row gaps are uniform.
 # Detection / download code (dc_sudoku_detect.py) is intentionally untouched.
 # ---------------------------------------------------------------------------
 CANONICAL_SIZE = (732, 606)  # width, height
 BOARD_BOXES = {
-    "dc-1": (40, 74, 342, 340),
-    "dc-2": (383, 72, 691, 340),
+    "dc-1": (26, 60, 356, 354),
+    "dc-2": (369, 58, 705, 354),
 }
 DIGITS = "123456789"
 
