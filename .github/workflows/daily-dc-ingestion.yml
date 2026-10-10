@@ -2,9 +2,14 @@ name: Daily DC Sudoku Ingestion
 
 on:
   schedule:
-    # 08:35 IST, Monday through Saturday.
-    - cron: "35 8 * * 1-6"
-      timezone: "Asia/Kolkata"
+    # 07:05 IST, Monday through Saturday.
+    # NOTE: GitHub evaluates cron in UTC only — a `timezone` key here is
+    # NOT supported (silently ignored), which is why the old `35 8` entry
+    # fired at 08:35 UTC = 14:05 IST instead of the intended morning slot.
+    # 01:35 UTC == 07:05 IST year-round (IST has no DST), and Mon-Sat maps
+    # 1:1 since 01:35 UTC is still the same weekday at +05:30. The job
+    # itself stamps the IST date at runtime (TZ=Asia/Kolkata below).
+    - cron: "35 1 * * 1-6"
 
   workflow_dispatch:
     inputs:
