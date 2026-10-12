@@ -2,14 +2,17 @@ name: Daily DC Sudoku Ingestion
 
 on:
   schedule:
-    # 09:05 IST, Monday through Saturday.
+    # Morning IST firing slots, Monday through Saturday.
     # NOTE: GitHub evaluates cron in UTC only — a `timezone` key here is
     # NOT supported (silently ignored), which is why the old `35 8` entry
     # fired at 08:35 UTC = 14:05 IST instead of the intended morning slot.
-    # 03:35 UTC == 09:05 IST year-round (IST has no DST), and Mon-Sat maps
-    # 1:1 since 03:35 UTC is still the same weekday at +05:30. The job
-    # itself stamps the IST date at runtime (TZ=Asia/Kolkata below).
-    - cron: "35 3 * * 1-6"
+    # 01:35/02:35/03:35 UTC == 07:05/08:05/09:05 IST year-round (IST has no
+    # DST), and Mon-Sat maps 1:1 since these hours are still the same
+    # weekday at +05:30. GitHub does not start scheduled runs on time
+    # (observed delays of 1-8h), so three slots plus the already-published
+    # guard below: whichever run executes first publishes the date, the
+    # rest exit early before downloading anything.
+    - cron: "35 1,2,3 * * 1-6"
 
   workflow_dispatch:
     inputs:
@@ -53,12 +56,33 @@ jobs:
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
           echo "Processing date: $DATE (Asia/Kolkata)"
 
+      # Scheduled runs only: if this date is already on main (an earlier
+      # slot published it, or a manual dispatch did), skip everything
+      # before hammering the ePaper server. Manual dispatches always run.
+      - name: Skip if date already published
+        id: guard
+        if: github.event_name == 'schedule'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE="${{ steps.date.outputs.date }}"
+          if gh api "repos/${{ github.repository }}/contents/frontend/public/data/dc/$DATE/dc-2.jpg" --silent >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Data for $DATE is already published; skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Data for $DATE is not published yet; proceeding."
+          fi
+
       - name: Set up Python
+        if: steps.guard.outputs.skip != 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.9"
 
       - name: Install OCR dependencies
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           sudo apt-get update
@@ -79,6 +103,7 @@ jobs:
       # Detection is intentionally unchanged. It finds and saves the best
       # DC Sudoku source image as sudoku_source.jpg.
       - name: Detect DC Sudoku source image
+        if: steps.guard.outputs.skip != 'true'
         run: |
           python ingestion/dc_sudoku_detect.py \
             --date "${{ steps.date.outputs.date }}" \
@@ -90,6 +115,7 @@ jobs:
             --keep-all
 
       - name: Show detection result
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           echo "=== Detection result ==="
@@ -106,6 +132,7 @@ jobs:
           PY
 
       - name: Crop Sudoku images and run OCR (dynamic grid lines + vote + guided repair)
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           python ingestion/dc_sudoku_pipeline.py \
@@ -115,6 +142,7 @@ jobs:
             --vote-top 3
 
       - name: Copy cropped Sudoku images into frontend data
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           DATE="${{ steps.date.outputs.date }}"
@@ -124,6 +152,7 @@ jobs:
           ls -lh "frontend/public/data/dc/$DATE/"
 
       - name: Show OCR and validation result
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           echo "=== OCR / validation result ==="
@@ -146,6 +175,7 @@ jobs:
           ls -lh "dc_test/${{ steps.date.outputs.date }}/sudoku/"
 
       - name: Generate canonical daily JSON
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           python - <<'PY'
@@ -185,6 +215,7 @@ jobs:
           PY
 
       - name: Refuse to publish unverified garbage
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           python - <<'PY'
@@ -255,6 +286,7 @@ jobs:
           gh issue create --title "DC ingestion failed for $DATE" --body-file /tmp/dc-issue.md || true
 
       - name: Commit daily Sudoku data and images
+        if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
@@ -265,9 +297,21 @@ jobs:
             exit 0
           fi
           git commit -m "data: update DC Sudoku for ${{ steps.date.outputs.date }}"
+          # Another slot may have published first; rebase so push does not
+          # fail spuriously (identical output rebases to empty -> push is a
+          # no-op; conflicting output aborts -> push fails -> human looks).
+          git fetch origin main --quiet
+          if ! git rebase origin/main; then
+            git rebase --abort
+          fi
+          if git diff origin/main...HEAD --quiet; then
+            echo "Another run already published this data; nothing to push."
+            exit 0
+          fi
           git push origin HEAD:main
 
       - name: Purge CDN cache for daily data
+        if: steps.guard.outputs.skip != 'true'
         continue-on-error: true
         shell: bash
         run: |
@@ -278,7 +322,7 @@ jobs:
           done
 
       - name: Upload complete ingestion artifacts
-        if: always()
+        if: always() && steps.guard.outputs.skip != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: dc-sudoku-${{ steps.date.outputs.date }}
@@ -287,7 +331,7 @@ jobs:
           retention-days: 14
 
       - name: Upload canonical daily JSON
-        if: always()
+        if: always() && steps.guard.outputs.skip != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: dc-sudoku-json-${{ steps.date.outputs.date }}
