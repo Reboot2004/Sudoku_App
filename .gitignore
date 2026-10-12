@@ -1,6 +1,7 @@
 node_modules/
 frontend/dist/
 frontend/android/
+dc_test/
 __pycache__/
 *.pyc
 .env
