@@ -1,8 +1,8 @@
 # Architecture
-Mobile solver/candidates run locally. Backend supplies daily DC data and provides optional personal-puzzle API persistence.
+Mobile solver/candidates run locally. Daily DC data arrives as static files from the scheduled ingestion pipeline (no backend service); personal puzzles persist in localStorage.
 
 DC ingestion uses direct image assets (`tabpX_Y`) and the proven reference/dimension/template detector; article links are not required.
-The daily GitHub workflow runs Monday-Saturday at 08:00 IST and skips Sundays.
+The daily GitHub workflow runs Monday-Saturday in morning IST firing slots (07:05/08:05/09:05; first run to execute publishes, the rest skip via the already-published guard) and skips Sundays.
 
 ## Ingestion hardening (post 2026-09-08 ad incident)
 - Detection gates candidates on a real 9x9 grid in the board zones (`grid_score`, morphology check); an ad can no longer win on thumbnail dimensions. No eligible candidate -> the job fails loudly instead of electing garbage.
