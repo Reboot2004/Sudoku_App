@@ -1,17 +1,17 @@
 {
   "index.html": {
-    "file": "assets/index-CaplIapi.js",
+    "file": "assets/index-vgpafViS.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true
   },
   "src/main.js": {
-    "file": "assets/app-B0rseL9_.js",
+    "file": "assets/app-RcQKMHNd.js",
     "name": "app",
     "src": "src/main.js",
     "isEntry": true,
     "css": [
-      "assets/app-BG2t6kfn.css"
+      "assets/app-CMWayBK9.css"
     ]
   }
 }
