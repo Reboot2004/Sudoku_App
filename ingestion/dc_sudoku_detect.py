@@ -430,6 +430,29 @@ def main():
         f"variants {args.variant_min}-{args.variant_max}"
     )
 
+    # Pre-flight check: verify today's edition is uploaded on DC ePaper server
+    preflight_1 = url_for(args.date, 1, 1)
+    preflight_2 = url_for(args.date, 2, 1)
+    try:
+        s = requests.Session()
+        s.headers.update({"User-Agent": UA})
+        r1 = s.head(preflight_1, timeout=TIMEOUT)
+        if r1.status_code == 404:
+            r2 = s.head(preflight_2, timeout=TIMEOUT)
+            if r2.status_code == 404:
+                print(f"Pre-flight check failed: DC ePaper for {args.date} is not published yet (HTTP 404).")
+                root.mkdir(parents=True, exist_ok=True)
+                diag = {
+                    "date": args.date,
+                    "error": f"DC ePaper for {args.date} is not published yet on ePaper server (HTTP 404).",
+                    "downloaded": 0,
+                    "eligible": 0,
+                }
+                (root / "detection.json").write_text(json.dumps(diag, indent=2), encoding="utf-8")
+                sys.exit(1)
+    except Exception as e:
+        print(f"Pre-flight check warning: {e}; proceeding with full scan.")
+
     tasks = [
         (page, variant)
         for page in range(

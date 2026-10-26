@@ -5,9 +5,11 @@ on:
     branches: [main]
     paths:
       - 'frontend/**'
+      - '!frontend/public/data/**'
   pull_request:
     paths:
       - 'frontend/**'
+      - '!frontend/public/data/**'
   workflow_dispatch:
 
 permissions:
