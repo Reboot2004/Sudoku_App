@@ -31,7 +31,7 @@ env:
 jobs:
   ingest:
     name: Detect, isolate and OCR DC Sudoku
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
